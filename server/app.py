@@ -398,6 +398,12 @@ def scene_reveal(scene_id: str, path: str):
     return _graph_call(scene_id, lambda g: g.reveal(path))
 
 
+@app.get("/api/scenes/{scene_id}/find")
+def scene_find(scene_id: str, q: str = ""):
+    """Prims whose name contains `q`, anywhere in the stage."""
+    return _graph_call(scene_id, lambda g: g.find(q))
+
+
 @app.get("/api/scenes/{scene_id}/prim")
 def scene_prim(scene_id: str, path: str):
     """One prim's detail: variants, schemas, property counts and opinions."""

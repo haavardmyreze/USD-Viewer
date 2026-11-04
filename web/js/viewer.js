@@ -5,6 +5,7 @@ import { Navigation } from './navigation.js';
 import { HELPER_LAYER, Picker } from './picking.js';
 import { LodManager } from './lod.js';
 import { Selection } from './selection.js';
+import { ShadingMaterials } from './shading.js';
 import { applyTriplanarToScene } from './triplanar.js';
 
 const SUN_DIRECTION = new THREE.Vector3(0.55, 0.7, 0.4).normalize();
@@ -60,8 +61,12 @@ export class Viewer {
     this.model = null;
     this.bounds = new THREE.Box3(new THREE.Vector3(-5, 0, -5), new THREE.Vector3(5, 2, 5));
     this.radius = 8;
-    this.options = { grid: true, shadows: true, doubleSided: false, detail: 'balanced' };
+    this.options = {
+      grid: true, shadows: true, doubleSided: false, detail: 'balanced', shading: 'material', matcap: 'clay',
+    };
     this._originalSides = new Map();
+    this._originalMaterials = new Map(); // mesh -> its own material, while shading replaces it
+    this._shading = new ShadingMaterials();
     this.ground = null;
     this.grid = null;
 
@@ -101,10 +106,12 @@ export class Viewer {
   setModel(gltf, { keepView = false } = {}) {
     if (this.model) {
       this.selection.clear();
+      this._restoreMaterials();
       this.scene.remove(this.model);
       disposeObject(this.model);
     }
     this._originalSides.clear();
+    this._originalMaterials.clear();
     const model = new THREE.Group();
     model.name = 'model';
     const main = gltf.scene;
@@ -149,7 +156,7 @@ export class Viewer {
     this.nav.setSceneRadius(this.radius);
     this._placeHelpers();
     this._placeSun();
-    this.setDoubleSided(this.options.doubleSided);
+    this.setDoubleSided(this.options.doubleSided); // also applies the shading mode
     if (!keepView) this.frameScene(false);
     this.nav.update(0);
     this._warmUp();
@@ -231,7 +238,7 @@ export class Viewer {
   setShadows(on) {
     this.options.shadows = on;
     this.sun.castShadow = on;
-    if (this.ground) this.ground.visible = on;
+    if (this.ground) this.ground.visible = on && this.options.shading !== 'wireframe';
     this._shadowsDirty = on;
     this.invalidate();
   }
@@ -250,13 +257,51 @@ export class Viewer {
     this.options.doubleSided = on;
     this.model?.traverse((o) => {
       if (!o.isMesh || o.userData.usdvOverlay) return;
-      for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+      const own = this._originalMaterials.get(o) ?? o.material;
+      for (const m of Array.isArray(own) ? own : [own]) {
         if (!this._originalSides.has(m)) this._originalSides.set(m, m.side);
         m.side = on ? THREE.DoubleSide : this._originalSides.get(m);
         m.needsUpdate = true;
       }
     });
+    this._applyShading(); // shading materials follow each mesh's sides
     this.invalidate();
+  }
+
+  /**
+   * Viewport shading, as in Blender: 'material' (the scene's own), 'matcap'
+   * (one lit-sphere look on everything, `look` picks which) or 'wireframe'.
+   */
+  setShading(mode, look = this.options.matcap) {
+    this.options.shading = mode;
+    this.options.matcap = look;
+    this._applyShading();
+    if (this.ground) this.ground.visible = this.options.shadows && mode !== 'wireframe';
+    // the shadow pass copies `wireframe` from each material: redraw it for the new mode
+    this._shadowsDirty = this.options.shadows;
+    this.invalidate();
+  }
+
+  _applyShading() {
+    if (!this.model) return;
+    const { shading, matcap } = this.options;
+    this.model.traverse((o) => {
+      if (!o.isMesh || o.userData.usdvOverlay) return;
+      if (!this._originalMaterials.has(o)) this._originalMaterials.set(o, o.material);
+      const own = this._originalMaterials.get(o);
+      if (shading === 'material') {
+        o.material = own;
+        return;
+      }
+      const side = (Array.isArray(own) ? own[0] : own)?.side ?? THREE.FrontSide;
+      const m = this._shading.get(shading, matcap, side);
+      o.material = Array.isArray(own) ? own.map(() => m) : m;
+    });
+  }
+
+  _restoreMaterials() {
+    for (const [mesh, own] of this._originalMaterials) mesh.material = own;
+    this._originalMaterials.clear();
   }
 
   stats() {
@@ -333,7 +378,7 @@ export class Viewer {
     this.grid.material.uniforms.uSpacing.value = Math.pow(10, Math.floor(Math.log10(Math.max(r / 5, 1e-3))));
     this.grid.material.uniforms.uFade.value = r * 6;
     this.grid.visible = this.options.grid;
-    this.ground.visible = this.options.shadows;
+    this.ground.visible = this.options.shadows && this.options.shading !== 'wireframe';
   }
 
   _placeSun() {

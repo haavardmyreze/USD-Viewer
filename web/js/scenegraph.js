@@ -11,7 +11,8 @@
 //
 // The tree is read a level at a time (/prims), a branch at a time for expand
 // all (/subtree) and a prim's detail on demand (/prim), so a heavy stage is
-// never walked whole. It opens expanded up to a budget, materials excepted.
+// never walked whole. It opens collapsed; Expand all opens up to a budget,
+// materials excepted.
 
 import { ARC_ICON, houdiniIcon, primIcon } from './houdini.js';
 
@@ -25,6 +26,7 @@ const ICONS = {
   copy: '<rect x="5.4" y="5.4" width="8" height="8" rx="1.5"/><path d="M10.6 5.4V4A1.4 1.4 0 0 0 9.2 2.6H4A1.4 1.4 0 0 0 2.6 4v5.2A1.4 1.4 0 0 0 4 10.6h1.4"/>',
   target: '<circle cx="8" cy="8" r="5.6"/><circle cx="8" cy="8" r="1.6"/><path d="M8 .8v2.4M8 12.8v2.4M.8 8h2.4M12.8 8h2.4"/>',
   close: '<path d="m4.5 4.5 7 7M11.5 4.5l-7 7"/>',
+  search: '<circle cx="7" cy="7" r="4.6"/><path d="m10.6 10.6 3 3"/>',
 };
 
 const ARC_NAME = {
@@ -54,8 +56,6 @@ function iconButton(name, title, onClick) {
   b.addEventListener('click', onClick);
   return b;
 }
-
-const countBadge = (value) => el('span', 'badge', typeof value === 'number' ? value.toLocaleString() : String(value));
 
 function facts() {
   const root = el('dl', 'facts');
@@ -110,6 +110,11 @@ export class SceneGraph {
     if (sceneId === this.sceneId) return;
     const before = this.state;
     this.sceneId = sceneId;
+    if (!keep) {
+      this.query = '';
+      this.results = null;
+      if (this.searchInput) this.searchInput.value = '';
+    }
     this.state = sceneId ? {
       levels: new Map(), pending: new Set(), errors: new Map(), open: new Set(),
       selected: null, instance: null, detail: null, primed: false, expanding: false,
@@ -205,10 +210,8 @@ export class SceneGraph {
     try {
       const level = await getJson(this._url('prims', primPath));
       state.levels.set(primPath, level);
-      if (primPath === ROOT && !state.primed) {
-        state.primed = true;
-        if (state === this.state) void this._expandAll(ROOT, { initial: true });
-      }
+      // the tree opens collapsed: top-level prims only, opened as you go
+      if (primPath === ROOT) state.primed = true;
     } catch (err) {
       state.errors.set(primPath, describe(err));
     } finally {
@@ -309,7 +312,7 @@ export class SceneGraph {
   render() {
     const s = this.state;
     if (!s) {
-      this.root.replaceChildren(el('p', 'blank', 'The scene graph needs a USD scene. A .glb file has none.'));
+      this.root.replaceChildren(el('p', 'blank', 'No scene graph for a .glb file.'));
       return;
     }
     const focused = document.activeElement?.closest?.('.prim[data-path]');
@@ -317,15 +320,15 @@ export class SceneGraph {
     const scroller = this.root.querySelector('.scene__tree');
     const scrollTop = scroller?.scrollTop ?? 0;
 
-    const top = s.levels.get(ROOT);
     const tree = el('div', 'scene__tree');
     tree.setAttribute('role', 'tree');
     tree.setAttribute('aria-label', 'Prims');
-    this._buildLevel(tree, s, ROOT, []);
-    const children = [this._buildBar(top), tree];
+    if (this.query) this._buildResults(tree, s);
+    else this._buildLevel(tree, s, ROOT, []);
+    const children = [this._buildBar(), tree];
     if (s.selected) children.push(this._buildDetail(s));
     this.root.replaceChildren(...children);
-    tree.scrollTop = scrollTop;
+    tree.scrollTop = this.query ? 0 : scrollTop;
 
     if (refocus) this.root.querySelector(`.prim[data-path="${CSS.escape(refocus)}"]`)?.focus({ preventScroll: true });
   }
@@ -334,23 +337,109 @@ export class SceneGraph {
     const s = this.state;
     if (!s?.selected) return;
     const row = this.root.querySelector(`.prim[data-path="${CSS.escape(s.selected)}"]`);
-    row?.scrollIntoView({ block: 'nearest' });
+    row?.scrollIntoView({ block: 'center' });
   }
 
-  _buildBar(top) {
+  /** Find box and expand / collapse. Built once, so typing keeps its focus. */
+  _buildBar() {
     const s = this.state;
-    const bar = el('div', 'scene__bar');
-    const heading = el('h3', undefined, 'Prims');
-    if (top) heading.appendChild(countBadge(top.total));
-    bar.appendChild(heading);
-    const tools = el('div', 'scene__tools');
-    const expand = iconButton('expandAll', 'Expand all', () => void this._expandAll());
-    expand.disabled = s.expanding || !top;
-    const collapse = iconButton('collapseAll', 'Collapse all', () => this._collapseAll());
-    collapse.disabled = s.expanding || !s.open.size;
-    tools.append(expand, collapse);
-    bar.appendChild(tools);
-    return bar;
+    if (!this.bar) {
+      this.bar = el('div', 'scene__bar');
+      const search = el('label', 'search');
+      search.appendChild(icon('search'));
+      const input = el('input');
+      input.type = 'search';
+      input.placeholder = 'Find';
+      input.spellcheck = false;
+      input.setAttribute('aria-label', 'Find a prim by name');
+      input.addEventListener('input', () => {
+        this.query = input.value.trim().toLowerCase();
+        this._search();
+        this.render();
+      });
+      input.addEventListener('keydown', (e) => {
+        e.stopPropagation(); // typing must not fly the camera or toggle settings
+        if (e.key === 'Escape') {
+          input.value = '';
+          this.query = '';
+          this.render();
+          input.blur();
+        } else if (e.key === 'Enter') {
+          this.root.querySelector('.scene__tree .prim[data-path]')?.click();
+        }
+      });
+      search.appendChild(input);
+      this.searchInput = input;
+      this.bar.appendChild(search);
+      this.tools = el('div', 'scene__tools');
+      this.expandBtn = iconButton('expandAll', 'Expand all', () => void this._expandAll());
+      this.collapseBtn = iconButton('collapseAll', 'Collapse all', () => this._collapseAll());
+      this.tools.append(this.expandBtn, this.collapseBtn);
+      this.bar.appendChild(this.tools);
+    }
+    this.expandBtn.disabled = s.expanding || !s.levels.has(ROOT) || !!this.query;
+    this.collapseBtn.disabled = s.expanding || !s.open.size || !!this.query;
+    return this.bar;
+  }
+
+  /** Ask the server for prims matching the find box (the tree may be mostly closed). */
+  _search() {
+    clearTimeout(this._searchTimer);
+    const query = this.query;
+    const state = this.state;
+    if (!query || !state) {
+      this.results = null;
+      return;
+    }
+    this.results = { query, pending: true, items: [] };
+    this._searchTimer = setTimeout(async () => {
+      try {
+        const url = `/api/scenes/${encodeURIComponent(this.sceneId)}/find?q=${encodeURIComponent(query)}`;
+        const out = await getJson(url);
+        if (this.query !== query || this.state !== state) return;
+        this.results = { query, pending: false, items: out.results, truncated: out.truncated };
+      } catch (err) {
+        if (this.query !== query) return;
+        this.results = { query, pending: false, items: [], error: describe(err) };
+      }
+      this.render();
+    }, 180);
+  }
+
+  /** The find box's matches: name, and the two levels above for context. */
+  _buildResults(host, s) {
+    const r = this.results;
+    if (!r || r.pending) {
+      host.appendChild(el('p', 'blank', 'Searching…'));
+      return;
+    }
+    if (r.error) {
+      host.appendChild(el('p', 'blank', r.error));
+      return;
+    }
+    if (!r.items.length) {
+      host.appendChild(el('p', 'blank', 'No prim with that name.'));
+      return;
+    }
+    for (const prim of r.items) {
+      const row = el('button', `prim prim--result${s.selected === prim.path ? ' is-on' : ''}`);
+      row.type = 'button';
+      row.dataset.path = prim.path;
+      row.title = prim.path;
+      row.appendChild(houdiniIcon(primIcon(prim.typeName, prim.kind), undefined, 'hicon prim__icon'));
+      row.appendChild(el('span', 'prim__name', prim.name));
+      row.appendChild(el('span', 'prim__where', parentOf(prim.path).split('/').slice(-2).join('/') || '/'));
+      row.addEventListener('click', async () => {
+        // show it in the tree: reveal reads and opens the levels down to it
+        this.query = '';
+        this.results = null;
+        if (this.searchInput) this.searchInput.value = '';
+        await this.reveal(prim.path);
+        this.callbacks.onSelect?.({ path: prim.path });
+      });
+      host.appendChild(row);
+    }
+    if (r.truncated) host.appendChild(el('p', 'blank', 'Showing the first matches. Type more to narrow it down.'));
   }
 
   /**
@@ -366,11 +455,11 @@ export class SceneGraph {
       return;
     }
     if (!level) {
-      host.appendChild(note('Composing…', rails));
+      host.appendChild(note('Loading…', rails));
       return;
     }
     if (!level.children.length && parent === ROOT) {
-      host.appendChild(el('p', 'blank', 'This stage composes no prims.'));
+      host.appendChild(el('p', 'blank', 'This scene is empty.'));
       return;
     }
     const more = level.total - level.children.length;
@@ -408,7 +497,7 @@ export class SceneGraph {
     const caret = el('span', `prim__caret${open ? ' is-open' : ''}${!branch && depth > 0 ? ' is-leaf' : ''}`);
     if (branch) {
       caret.appendChild(icon('chevronRight'));
-      caret.title = 'Shift-click to expand or collapse everything beneath';
+      caret.title = 'Shift-click to open or close everything inside';
       caret.addEventListener('click', (e) => {
         e.stopPropagation();
         if (!e.shiftKey) this._toggle(prim);
@@ -420,33 +509,27 @@ export class SceneGraph {
     row.appendChild(houdiniIcon(primIcon(prim.typeName, prim.kind), undefined, 'hicon prim__icon'));
     row.appendChild(el('span', 'prim__name', prim.name));
 
+    // only what an artist acts on: the variant, and where the content comes from
     const flags = el('span', 'prim__flags');
     if (prim.variants) {
       const selections = Object.entries(prim.variants);
       const pill = el('span', 'prim__variant');
-      pill.appendChild(houdiniIcon('LOP__setvariant', undefined, 'hicon hicon--flag'));
       pill.appendChild(el('span', undefined,
-        selections.length === 1 ? selections[0][1] || '(none)' : String(selections.length)));
-      pill.title = selections.map(([set, value]) => `Variant ${set} = ${value || '(none)'}`).join('\n');
+        selections.length === 1 ? selections[0][1] || '(none)' : `${selections.length} variants`));
+      pill.title = selections.map(([set, value]) => `${set}: ${value || '(none)'}`).join('\n');
       flags.appendChild(pill);
     }
-    for (const arc of prim.arcs) {
-      if (arc === 'reference') {
-        flags.appendChild(houdiniIcon('LOP__reference', 'Has an authored reference', 'hicon hicon--flag'));
-      } else if (arc === 'payload') {
-        flags.appendChild(houdiniIcon('SCENEGRAPH__payloads', prim.unloaded ? 'Payload, not loaded' : 'Payload, loaded',
-          `hicon hicon--flag${prim.unloaded ? ' is-unloaded' : ''}`));
-      } else {
-        const f = el('span', 'prim__flag', arc);
-        f.title = `Has an authored ${arc}`;
-        flags.appendChild(f);
-      }
+    if (prim.arcs.includes('reference')) {
+      flags.appendChild(houdiniIcon('LOP__reference', 'Brought in by a reference', 'hicon hicon--flag'));
+    }
+    if (prim.arcs.includes('payload')) {
+      flags.appendChild(houdiniIcon('SCENEGRAPH__payloads', prim.unloaded ? 'Payload, not loaded' : 'Brought in by a payload',
+        `hicon hicon--flag${prim.unloaded ? ' is-unloaded' : ''}`));
     }
     if (prim.instance) {
-      flags.appendChild(houdiniIcon('SCENEGRAPH__primtype__instances', 'Instanceable, sharing one prototype', 'hicon hicon--flag'));
+      flags.appendChild(houdiniIcon('SCENEGRAPH__primtype__instances', 'Instance: shares its contents with copies', 'hicon hicon--flag'));
     }
     if (flags.childElementCount) row.appendChild(flags);
-    row.appendChild(el('span', 'prim__type', prim.typeName));
 
     row.addEventListener('click', (e) => {
       if (e.detail > 1) return; // the second click of a double-click
@@ -459,60 +542,60 @@ export class SceneGraph {
     return row;
   }
 
+  /**
+   * The picked prim: name and what it is first, then its variants. Paths,
+   * schemas and the layers it comes from are folded away under "Details".
+   */
   _buildDetail(s) {
-    const section = el('div', 'scene__detail');
+    const section = el('div', 'scene__detail pdetail');
     const path = s.selected;
     const detail = s.detail;
+    const prim = this._findPrim(path);
+    const typeName = detail?.typeName ?? prim?.typeName ?? '';
+    const kind = detail?.kind ?? prim?.kind;
 
-    const head = el('div', 'insp__path');
-    const text = el('span', 'insp__pathText trunc', `‎${path}${s.instance !== null ? `[${s.instance}]` : ''}`);
-    text.title = path;
-    head.appendChild(text);
-    head.appendChild(iconButton('target', 'Frame in view (F)', () => this.callbacks.onFrame?.(path)));
-    head.appendChild(iconButton('copy', 'Copy prim path', () => void this._copy(path)));
-    head.appendChild(iconButton('close', 'Clear selection (Esc)', () => this._setSelected(null)));
+    const head = el('div', 'pdetail__head');
+    head.appendChild(houdiniIcon(primIcon(typeName, kind), undefined, 'hicon pdetail__icon'));
+    const title = el('div', 'pdetail__title');
+    const name = path.slice(path.lastIndexOf('/') + 1) || '/';
+    title.appendChild(el('div', 'pdetail__name', s.instance !== null ? `${name} [${s.instance}]` : name));
+    title.appendChild(el('div', 'pdetail__sub', [typeName || 'Prim', kind ? capitalize(kind) : null].filter(Boolean).join(' · ')));
+    title.title = path;
+    head.appendChild(title);
+    const actions = el('div', 'pdetail__actions');
+    actions.append(
+      iconButton('target', 'Frame it (F)', () => this.callbacks.onFrame?.(path)),
+      iconButton('copy', 'Copy its path', () => void this._copy(path)),
+      iconButton('close', 'Deselect (Esc)', () => this._setSelected(null)),
+    );
+    head.appendChild(actions);
     section.appendChild(head);
 
-    if (!detail) {
-      section.appendChild(el('p', 'blank', 'Reading prim…'));
-      return section;
-    }
-
-    const f = facts();
-    f.add('Type', detail.typeName || '(typeless)', true);
-    f.add('Kind', detail.kind, true);
-    if (detail.specifier !== 'def') f.add('Specifier', detail.specifier);
-    if (!detail.active) f.add('Active', 'no');
-    if (s.instance !== null) f.add('Instance', `#${s.instance} of this instancer`);
-    if (detail.instance) f.add('Instance', 'instanceable');
-    if (detail.instanceProxy) f.add('Instance', 'inside an instance');
-    if (detail.arcs.includes('payload')) f.add('Payload', detail.unloaded ? 'not loaded' : 'loaded');
-    // variant selections inside an instance cannot be overridden from its proxy
-    const switchable = !detail.instanceProxy && this.callbacks.onVariant;
-    if (!switchable) {
-      for (const set of detail.variantSets) {
-        const value = el('span', undefined, set.selection ?? '(none)');
-        value.title = `Options: ${set.options.join(', ') || 'none'}`;
-        f.add(`{${set.name}}`, value, true);
-      }
-    }
-    if (detail.appliedSchemas.length) f.add('Schemas', detail.appliedSchemas.join(', '), true);
-    f.add('Properties', `${detail.attributeCount} attr · ${detail.relationshipCount} rel`);
+    const chips = el('div', 'chips');
+    const chip = (text, accent = false, tip = '') => {
+      const c = el('span', `chip${accent ? ' chip--accent' : ''}`, text);
+      if (tip) c.title = tip;
+      chips.appendChild(c);
+    };
+    if (s.instance !== null) chip(`Instance ${s.instance}`, true, 'One copy placed by this point instancer');
     const geo = this.callbacks.geometry?.({ path, instance: s.instance });
     if (geo) {
-      f.add('In view', geo.objects
-        ? `${fmtCount(geo.instances)} ${geo.instances === 1 ? 'object' : 'objects'} · ${fmtCount(geo.triangles)} tris`
-        : 'no geometry');
+      chip(geo.objects ? `${fmtCount(geo.instances)} ${geo.instances === 1 ? 'object' : 'objects'} · ${fmtCount(geo.triangles)} triangles`
+        : 'Nothing visible');
     }
-    section.appendChild(f.root);
+    if (detail && !detail.active) chip('Deactivated');
+    if (detail?.instanceProxy) chip('Inside an instance', false, 'Shares its contents with other copies; edit the original');
+    if (detail?.unloaded) chip('Not loaded');
+    if (chips.childElementCount) section.appendChild(chips);
 
-    if (switchable && detail.variantSets.some((set) => set.options.length)) {
-      const vh = el('h3', undefined, 'Variants');
-      vh.title = 'Switching re-composes the stage with this selection; the files are not changed';
-      section.appendChild(vh);
-      const sets = el('div', 'vsets');
-      for (const set of detail.variantSets) {
-        if (!set.options.length) continue;
+    if (!detail) return section;
+
+    // variants: switchable, except inside an instance (edits there would not apply)
+    const sets = detail.variantSets.filter((set) => set.options.length);
+    if (sets.length) {
+      const switchable = !detail.instanceProxy && this.callbacks.onVariant;
+      const box = el('div', 'vsets');
+      for (const set of sets) {
         const row = el('div', 'vset');
         row.appendChild(el('span', 'vset__label', set.name));
         const seg = el('div', 'seg');
@@ -523,22 +606,34 @@ export class SceneGraph {
           b.type = 'button';
           b.setAttribute('role', 'radio');
           b.setAttribute('aria-checked', String(option === set.selection));
-          b.disabled = !!this.busy;
+          b.disabled = !!this.busy || !switchable;
           b.addEventListener('click', () => {
             if (option !== set.selection) this.callbacks.onVariant(path, set.name, option);
           });
           seg.appendChild(b);
         }
         row.appendChild(seg);
-        sets.appendChild(row);
+        box.appendChild(row);
       }
-      section.appendChild(sets);
+      section.appendChild(box);
     }
 
-    const heading = el('h3', undefined, 'Opinions');
-    heading.appendChild(countBadge(detail.opinions.length));
+    const more = el('details', 'disclosure');
+    more.open = !!this.detailsOpen;
+    more.addEventListener('toggle', () => { this.detailsOpen = more.open; });
+    more.appendChild(el('summary', undefined, 'Details'));
+    const f = facts();
+    f.add('Path', path, true);
+    if (detail.specifier !== 'def') f.add('Specifier', detail.specifier);
+    if (detail.appliedSchemas.length) f.add('Schemas', detail.appliedSchemas.join(', '), true);
+    f.add('Properties', `${detail.attributeCount} attributes, ${detail.relationshipCount} relationships`);
+    const other = detail.arcs.filter((a) => a === 'inherit' || a === 'specialize');
+    if (other.length) f.add('Also', other.map((a) => `${a}s`).join(', '));
+    more.appendChild(f.root);
+
+    const heading = el('h3', undefined, 'Comes from');
     heading.title = 'Every layer with something to say about this prim, strongest first';
-    section.appendChild(heading);
+    more.appendChild(heading);
     const list = el('div', 'arc-list');
     for (const opinion of detail.opinions) {
       const row = el('div', `arc${opinion.root ? ' arc--here' : ''}`);
@@ -548,15 +643,14 @@ export class SceneGraph {
       row.appendChild(pip);
       const main = el('div', 'arc__main');
       main.appendChild(el('div', 'arc__name', opinion.name));
-      const meta = [opinion.specPath];
-      if (opinion.introducedBy) meta.push(`from ${opinion.introducedBy}`);
-      main.appendChild(el('div', 'arc__meta', meta.join('  ·  ')));
       row.appendChild(main);
       row.appendChild(el('span', 'arc__kind', opinion.root ? 'root layer' : ARC_NAME[opinion.arc] ?? opinion.arc));
-      row.title = opinion.layerPath;
+      row.title = [opinion.layerPath, opinion.specPath, opinion.introducedBy ? `via ${opinion.introducedBy}` : '']
+        .filter(Boolean).join('\n');
       list.appendChild(row);
     }
-    section.appendChild(list);
+    more.appendChild(list);
+    section.appendChild(more);
     return section;
   }
 
@@ -667,6 +761,10 @@ function parentOf(path) {
 
 function describe(err) {
   return err instanceof ApiError ? err.message : 'Could not read the scene graph';
+}
+
+function capitalize(text) {
+  return text ? text[0].toUpperCase() + text.slice(1) : text;
 }
 
 function fmtCount(n) {

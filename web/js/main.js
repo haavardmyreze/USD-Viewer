@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { Viewer } from './viewer.js';
 import { SceneGraph } from './scenegraph.js';
+import { MATCAPS, SHADING_MODES, matcap } from './shading.js';
 import {
   convertUpload, filesFromDrop, filesFromInput, getHealth, getUpload, isDirectGltf, openPath, uploadFiles,
 } from './upload.js';
@@ -42,14 +43,6 @@ const store = {
     try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode */ }
   },
 };
-
-function list(ul, items) {
-  ul.replaceChildren(...items.map((t) => {
-    const li = document.createElement('li');
-    li.textContent = t;
-    return li;
-  }));
-}
 
 // -- status: loading card + toast -----------------------------------------------------
 
@@ -94,19 +87,62 @@ function hideOpen() {
 function showSceneChrome() {
   $('welcome').hidden = true;
   $('topbar').hidden = false;
-  $('inspector').hidden = false;
-  $('btn-graph').hidden = current.source === 'file';
-  if (current.source !== 'file' && store.get('usdv.graph', false) && $('graph').hidden) setGraph(true);
-  if (current.source === 'file' && !$('graph').hidden) setGraph(false);
-  $('hud').hidden = false;
+  const noStage = current.source === 'file';
+  $('tab-scene-btn').disabled = noStage;
+  if (noStage && panel.tab === 'scene') panel.tab = 'info';
+  setPanel(panel.open);
   if (!store.get('usdv.hintSeen', false)) $('nav-hint').hidden = false;
 }
 
-function setInspector(open) {
-  document.body.classList.toggle('no-inspector', !open);
-  $('btn-inspector').setAttribute('aria-pressed', String(open));
-  store.set('usdv.inspector', open);
+// -- side panel: scene graph · display · info --------------------------------------
+
+const panel = { open: store.get('usdv.panel', true), tab: store.get('usdv.tab', 'scene') };
+
+function setPanel(open, tab = panel.tab) {
+  if (tab === 'scene' && $('tab-scene-btn').disabled) tab = 'info';
+  panel.open = open;
+  panel.tab = tab;
+  store.set('usdv.panel', open);
+  store.set('usdv.tab', tab);
+  $('panel').hidden = !open || $('topbar').hidden;
+  document.body.classList.toggle('panel-open', open);
+  $('btn-panel').setAttribute('aria-pressed', String(open));
+  for (const b of $('panel').querySelectorAll('.tab')) b.setAttribute('aria-selected', String(b.dataset.tab === tab));
+  for (const name of ['scene', 'view', 'info']) $(`tab-${name}`).hidden = name !== tab;
+  if (open && tab === 'scene') graph.activate();
+  else graph.deactivate();
 }
+
+/** A shortcut for one tab: open it, or close the panel if it is already showing. */
+function togglePanelTab(tab) {
+  if (panel.open && panel.tab === tab) setPanel(false);
+  else setPanel(true, tab);
+}
+
+// the panel's width: dragged at its left edge, remembered
+function setPanelWidth(width) {
+  const max = Math.max(320, Math.min(900, window.innerWidth * 0.7));
+  const w = Math.round(Math.min(Math.max(width, 320), max));
+  $('panel').style.setProperty('--panel-w', `${w}px`);
+  return w;
+}
+setPanelWidth(store.get('usdv.panelWidth', 420));
+$('panel-resize').addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  const handle = e.currentTarget;
+  handle.setPointerCapture(e.pointerId);
+  document.body.classList.add('resizing-panel');
+  const right = window.innerWidth - $('panel').getBoundingClientRect().right;
+  const move = (ev) => store.set('usdv.panelWidth', setPanelWidth(window.innerWidth - right - ev.clientX));
+  const up = () => {
+    document.body.classList.remove('resizing-panel');
+    handle.removeEventListener('pointermove', move);
+    handle.removeEventListener('pointerup', up);
+  };
+  handle.addEventListener('pointermove', move);
+  handle.addEventListener('pointerup', up);
+});
+$('panel-resize').addEventListener('dblclick', () => store.set('usdv.panelWidth', setPanelWidth(420)));
 
 // -- recent scenes --------------------------------------------------------------------
 
@@ -144,81 +180,140 @@ function renderRecent() {
   }));
 }
 
-// -- report -> inspector ----------------------------------------------------------------
+// -- report -> info tab --------------------------------------------------------------
+
+/** "1.5" / "12" / "120": a length that reads well in a tile. */
+function fmtLength(m) {
+  if (m >= 100) return m.toFixed(0);
+  if (m >= 10) return m.toFixed(0);
+  if (m >= 1) return m.toFixed(1);
+  return m.toFixed(2);
+}
+
+/** Warnings are written for developers: show file names and prim names, not paths. */
+function friendly(text) {
+  return String(text)
+    // file paths (absolute or relative, either slash) -> file name
+    .replace(/(?:[A-Za-z]:)?(?:[\w.@ -]*[\\/])+([\w.@-]+\.[A-Za-z0-9]{2,5})/g, '$1')
+    // prim paths -> prim name
+    .replace(/(?:\/[A-Za-z_][\w-]*){2,}/g, (m) => m.slice(m.lastIndexOf('/') + 1))
+    .replace(/^Material ([^:]+): /, '$1: ');
+}
+
+const ICON_OK = '<svg class="issue__icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12.5 2.6 2.6L16 9.6"/></svg>';
+const ICON_BAD = '<svg class="issue__icon" viewBox="0 0 24 24"><path d="M12 3.5 21.5 20h-19z"/><path d="M12 10v4.2M12 17v.1"/></svg>';
+const ICON_WARN = '<svg class="issue__icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7.6v5.2M12 16v.1"/></svg>';
+const CHEVRON = '<svg class="chev" viewBox="0 0 16 16"><path d="m6 3.5 4.5 4.5L6 12.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>';
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+/** A folded issue: a headline, one line of advice, and the list behind it. */
+function issueBox(kind, title, sub, items) {
+  const box = el('details', `issue issue--${kind}`);
+  const summary = el('summary');
+  summary.innerHTML = kind === 'bad' ? ICON_BAD : ICON_WARN;
+  const text = el('div', 'issue__text');
+  text.append(el('div', 'issue__title', title));
+  if (sub) text.append(el('div', 'issue__sub', sub));
+  summary.append(text);
+  summary.insertAdjacentHTML('beforeend', CHEVRON);
+  box.append(summary);
+  const ul = el('ul', 'filelist');
+  for (const item of items) {
+    const li = el('li', undefined, item.label);
+    li.title = item.title;
+    ul.append(li);
+  }
+  box.append(ul);
+  return box;
+}
 
 function showReport(report) {
   const s = report?.stats;
   const view = viewer.stats();
 
-  const name = report ? basename(report.root) : current.path;
+  const name = report ? basename(report.root) : basename(current.path);
   $('scene-name').textContent = name || 'Scene';
-  const sub = [];
-  if (report) {
-    sub.push(report.source === 'path' ? 'Opened in place' : 'Uploaded');
-    sub.push(report.purpose === 'proxy' ? 'proxy geometry' : 'render geometry');
-  } else {
-    sub.push('glTF file');
-  }
-  $('scene-sub').textContent = sub.join(' · ');
-  $('scene-path').textContent = report?.source === 'path' ? report.path : (report?.root || '');
-  $('scene-path').hidden = !$('scene-path').textContent;
+  $('scene-sub').textContent = report?.purpose === 'proxy' ? 'Proxy geometry' : '';
+  $('scene-sub').hidden = !$('scene-sub').textContent;
   document.title = `${name} · USD Viewer`;
 
-  const rows = [];
-  rows.push(['Triangles', fmtCount(view.fullTriangles || s?.triangles || 0)]);
-  if (s) {
-    if (s.instances) rows.push(['Instances', fmtCount(s.meshPrims)]);
-    else rows.push(['Mesh prims', fmtCount(s.meshPrims)]);
-    if (s.pointInstancers) rows.push(['Point instancers', fmtCount(s.pointInstancers)]);
-    rows.push(['Unique meshes', fmtCount(s.uniqueMeshes)]);
-    rows.push(['Materials · textures', `${s.materials} · ${s.textures}`]);
-  }
+  // the file
+  const full = report?.source === 'path' ? report.path : (report?.root || current.path || '');
+  const folder = basename(full.replace(/[\\/][^\\/]*$/, ''));
+  $('info-name').textContent = name;
+  $('info-where').textContent = !report ? 'glTF file' : report.source === 'path' ? `in ${folder || full}` : 'Uploaded';
+  $('info-where').title = full;
+  $('copy-path').hidden = !full;
+
+  // four numbers that matter
   const size = view.size;
-  rows.push(['Size', `${size.x.toFixed(1)} × ${size.y.toFixed(1)} × ${size.z.toFixed(1)} m`]);
-  if (report) {
-    rows.push(['Up axis · units', `${report.upAxis} · ${report.metersPerUnit} m`]);
-    rows.push(['Layers', fmtCount(report.layers.length)]);
-    rows.push(['Converted', `${report.seconds.toFixed(1)} s · ${fmtBytes(report.glbBytes)}`]);
-  }
-  $('stats').replaceChildren(...rows.flatMap(([k, v]) => {
-    const dt = document.createElement('dt');
-    dt.textContent = k;
-    const dd = document.createElement('dd');
-    dd.textContent = v;
-    dd.title = v;
-    return [dt, dd];
+  const tiles = [
+    [fmtCount(view.fullTriangles || s?.triangles || 0), 'Triangles'],
+    [s ? fmtCount(s.meshPrims) : '–', s?.instances ? 'Objects (incl. instances)' : 'Objects'],
+    [s ? String(s.materials) : '–', s?.textures ? `Materials · ${s.textures} textures` : 'Materials'],
+    [`${fmtLength(size.x)} × ${fmtLength(size.y)} × ${fmtLength(size.z)}`, 'Size in metres'],
+  ];
+  $('stats').replaceChildren(...tiles.map(([value, label]) => {
+    const tile = el('div', 'tile');
+    const v = el('div', 'tile__value', value);
+    v.title = value;
+    tile.append(v, el('div', 'tile__label', label));
+    return tile;
   }));
 
-  // issues
+  // problems, in plain words
   const missing = report?.unresolved || [];
   const warnings = report ? [...report.compositionErrors, ...report.warnings] : [];
-  $('issues-block').hidden = missing.length + warnings.length === 0;
-  $('issues-count').textContent = missing.length + warnings.length;
-  $('missing-details').hidden = missing.length === 0;
-  $('missing-count').textContent = missing.length;
-  list($('missing-list'), missing);
-  $('warnings-details').hidden = warnings.length === 0;
-  $('warnings-count').textContent = warnings.length;
-  list($('warnings-list'), warnings);
-  $('warnings-details').open = missing.length === 0 && warnings.length <= 3;
-  $('issues-dot').hidden = missing.length + warnings.length === 0;
-  $('issues-dot').classList.toggle('bad', missing.length > 0);
-
-  const explain = $('missing-explain');
-  explain.hidden = missing.length === 0;
-  if (report?.source === 'upload') {
-    explain.textContent = 'These files are outside what was dropped. The browser can only send what you give it: '
-      + 'drop the folder that contains everything (e.g. the project root)'
-      + (localPaths ? ", or open the root layer's path to read it in place." : '.');
-  } else {
-    explain.textContent = 'These files are referenced by the scene but do not exist on disk.';
+  const issues = [];
+  if (missing.length) {
+    const advice = report?.source === 'upload'
+      ? (localPaths ? 'Drop the whole project folder, or open the file by its path.' : 'Drop the whole project folder.')
+      : 'Referenced, but not on disk.';
+    issues.push(issueBox('bad', `${missing.length} missing ${missing.length === 1 ? 'file' : 'files'}`, advice,
+      missing.map((m) => ({ label: basename(m), title: m }))));
   }
-  if (missing.length && store.get('usdv.inspector', true) === false) setInspector(true);
+  if (warnings.length) {
+    issues.push(issueBox('warn', `${warnings.length} ${warnings.length === 1 ? 'note' : 'notes'}`,
+      'Things shown differently than in Houdini.', warnings.map((w) => ({ label: friendly(w), title: w }))));
+  }
+  if (!issues.length && report) {
+    const ok = el('div', 'issue issue--ok');
+    ok.innerHTML = ICON_OK;
+    ok.append(el('div', 'issue__title', 'Everything loaded'));
+    issues.push(ok);
+  }
+  $('issues').replaceChildren(...issues);
+  $('issues').hidden = !issues.length;
+  const dot = missing.length + warnings.length > 0;
+  for (const id of ['issues-dot', 'info-dot']) {
+    $(id).hidden = !dot;
+    $(id).classList.toggle('bad', missing.length > 0);
+  }
+  if (missing.length && !panel.open) setPanel(true, 'info');
 
+  // layers, by name
   const layers = report?.layers || [];
   $('layers-block').hidden = layers.length === 0;
   $('layers-count').textContent = layers.length;
-  list($('layers-list'), layers);
+  $('layers-list').replaceChildren(...layers.map((layer) => {
+    const li = el('li', undefined, basename(layer));
+    li.title = layer;
+    return li;
+  }));
+
+  const foot = [];
+  if (report) {
+    foot.push(`${report.upAxis}-up`);
+    foot.push(`converted in ${report.seconds.toFixed(1)} s`);
+    foot.push(fmtBytes(report.glbBytes));
+  }
+  $('info-foot').textContent = foot.join(' · ');
 }
 
 /**
@@ -233,7 +328,9 @@ function showRoots(candidates, selected) {
   $('root-select').replaceChildren(...options.map((f) => {
     const o = document.createElement('option');
     o.value = f;
-    o.textContent = candidates.includes(f) ? f : `${f}  (not an assembly)`;
+    // the file name reads better than a path; the folder only tells sets and assets apart
+    o.textContent = candidates.includes(f) ? basename(f) : `${basename(f)} (not an assembly)`;
+    o.title = f;
     return o;
   }));
   if (selected) $('root-select').value = selected;
@@ -493,15 +590,6 @@ const graph = new SceneGraph($('graph-body'), {
   onVariant: (path, set, value) => setVariant(path, set, value),
 });
 
-function setGraph(open) {
-  $('graph').hidden = !open;
-  document.body.classList.toggle('graph-open', open);
-  $('btn-graph').setAttribute('aria-pressed', String(open));
-  store.set('usdv.graph', open);
-  if (open) graph.activate();
-  else graph.deactivate();
-}
-
 /** Select from the 3D view (or clear with null); the tree opens onto the prim. */
 function selectFromView(hit) {
   if (!hit) {
@@ -538,16 +626,67 @@ function bindSwitch(id, key, apply) {
 bindSwitch('opt-grid', 'grid', (on) => viewer.setGrid(on));
 bindSwitch('opt-shadows', 'shadows', (on) => viewer.setShadows(on));
 bindSwitch('opt-double', 'doubleSided', (on) => viewer.setDoubleSided(on));
+let showStats = false;
+bindSwitch('opt-stats', 'stats', (on) => { showStats = on; });
 $('opt-proxy').addEventListener('change', () => {
   $('opt-proxy').checked = purpose === 'proxy'; // togglePurpose decides
   togglePurpose();
 });
+
+// -- viewport shading: material · matcap · wireframe ----------------------------------
+
+function setShading(mode, look = settings.matcap || 'clay') {
+  if (!SHADING_MODES.includes(mode)) mode = 'material';
+  viewer.setShading(mode, look);
+  for (const b of document.querySelectorAll('[data-shading]')) {
+    b.setAttribute('aria-checked', String(b.dataset.shading === mode));
+  }
+  for (const b of $('matcaps').children) b.setAttribute('aria-checked', String(b.dataset.look === look));
+  $('matcaps').hidden = mode !== 'matcap';
+  saveSetting('shading', mode);
+  saveSetting('matcap', look);
+}
+
+$('matcaps').replaceChildren(...MATCAPS.map((m) => {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'swatch';
+  b.dataset.look = m.id;
+  b.title = m.label;
+  b.setAttribute('role', 'radio');
+  b.setAttribute('aria-label', m.label);
+  const img = document.createElement('img');
+  img.src = matcap(m.id).url;
+  img.alt = '';
+  const label = document.createElement('span');
+  label.textContent = m.label;
+  b.append(img, label);
+  b.addEventListener('click', () => setShading('matcap', m.id));
+  return b;
+}));
+for (const b of document.querySelectorAll('[data-shading]')) {
+  b.addEventListener('click', () => setShading(b.dataset.shading));
+}
+setShading(settings.shading || 'material', settings.matcap || 'clay');
+
+function cycleShading() {
+  const at = SHADING_MODES.indexOf(viewer.options.shading);
+  setShading(SHADING_MODES[(at + 1) % SHADING_MODES.length]);
+}
+
+const DETAIL_HINTS = {
+  fast: 'Simplifies sooner. Smoothest on very heavy scenes.',
+  balanced: 'Full detail up close, simpler far away.',
+  high: 'Full detail further out.',
+  full: 'Always full detail. Can be slow on heavy scenes.',
+};
 
 function setDetail(value) {
   viewer.setDetail(value);
   for (const b of $('detail').querySelectorAll('button')) {
     b.setAttribute('aria-checked', String(b.dataset.value === value));
   }
+  $('detail-hint').textContent = DETAIL_HINTS[value] || '';
   saveSetting('detail', value);
 }
 $('detail').addEventListener('click', (e) => {
@@ -556,10 +695,15 @@ $('detail').addEventListener('click', (e) => {
 });
 setDetail(settings.detail || 'balanced');
 
+function showExposure(stops) {
+  $('exposure-value').textContent = stops === 0 ? '0' : `${stops > 0 ? '+' : ''}${stops.toFixed(1)}`;
+}
 $('opt-exposure').value = settings.exposure ?? 0;
 viewer.setExposure(2 ** Number($('opt-exposure').value));
+showExposure(Number($('opt-exposure').value));
 $('opt-exposure').addEventListener('input', (e) => {
   viewer.setExposure(2 ** Number(e.target.value));
+  showExposure(Number(e.target.value));
   saveSetting('exposure', Number(e.target.value));
 });
 $('opt-exposure').addEventListener('dblclick', (e) => {
@@ -567,7 +711,6 @@ $('opt-exposure').addEventListener('dblclick', (e) => {
   e.target.dispatchEvent(new Event('input'));
 });
 
-setInspector(store.get('usdv.inspector', true));
 
 // -- wiring -------------------------------------------------------------------------------------
 
@@ -595,8 +738,17 @@ $('btn-open').addEventListener('click', showOpen);
 $('welcome-close').addEventListener('click', hideOpen);
 $('welcome').addEventListener('pointerdown', (e) => { if (e.target === $('welcome')) hideOpen(); });
 $('btn-frame').addEventListener('click', frame);
-$('btn-graph').addEventListener('click', () => setGraph($('graph').hidden));
-$('graph-close').addEventListener('click', () => setGraph(false));
+$('btn-panel').addEventListener('click', () => setPanel(!panel.open));
+$('panel-close').addEventListener('click', () => setPanel(false));
+for (const b of $('panel').querySelectorAll('.tab')) b.addEventListener('click', () => setPanel(true, b.dataset.tab));
+$('copy-path').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('info-where').title);
+    toast('Path copied', 'ok');
+  } catch {
+    toast('Could not copy to the clipboard');
+  }
+});
 
 // click (not drag) in the view selects what is under the cursor
 let pressAt = null;
@@ -612,7 +764,6 @@ $('viewport').addEventListener('pointerup', (e) => {
   selectFromView(viewer.pickObject(e.clientX - rect.left, e.clientY - rect.top));
 });
 $('btn-proxy').addEventListener('click', togglePurpose);
-$('btn-inspector').addEventListener('click', () => setInspector(document.body.classList.contains('no-inspector')));
 $('btn-help').addEventListener('click', () => { $('help').hidden = false; });
 $('help-close').addEventListener('click', () => { $('help').hidden = true; });
 $('help').addEventListener('pointerdown', (e) => { if (e.target === $('help')) $('help').hidden = true; });
@@ -643,13 +794,14 @@ window.addEventListener('keydown', (e) => {
   const click = (id) => $(id).click();
   switch (e.code) {
     case 'KeyF': frame(); break;
-    case 'KeyT': if (graph.sceneId) setGraph($('graph').hidden); break;
+    case 'KeyZ': cycleShading(); break;
+    case 'KeyT': if (graph.sceneId) togglePanelTab('scene'); break;
 
     case 'KeyG': click('opt-grid'); break;
     case 'KeyL': click('opt-shadows'); break;
     case 'KeyB': click('opt-double'); break;
     case 'KeyP': togglePurpose(); break;
-    case 'KeyI': click('btn-inspector'); break;
+    case 'KeyI': togglePanelTab('info'); break;
     case 'KeyO': showOpen(); break;
     case 'Slash': case 'F1': $('help').hidden = !$('help').hidden; break;
     default: return;
@@ -731,10 +883,15 @@ viewer.onFrame = (rendered) => {
   }
   if (now - lastHud < 250 || !viewer.model) return;
   lastHud = now;
-  const s = viewer.stats();
-  $('hud-fps').textContent = fps >= 3 ? `${Math.round(fps)} fps` : 'still';
-  $('hud-tris').textContent = `${fmtCount(s.drawnTriangles)} tris drawn`;
-  $('hud-speed').textContent = nav.isFlying ? `fly ${nav.speed.toPrecision(2)} m/s` : '';
+  $('hud').hidden = !(showStats || nav.isFlying);
+  $('hud-fps').hidden = !showStats;
+  $('hud-tris').hidden = !showStats;
+  if (showStats) {
+    const s = viewer.stats();
+    $('hud-fps').textContent = fps >= 3 ? `${Math.round(fps)} fps` : 'idle';
+    $('hud-tris').textContent = `${fmtCount(s.drawnTriangles)} triangles`;
+  }
+  $('hud-speed').textContent = nav.isFlying ? `Flying ${nav.speed.toPrecision(2)} m/s` : '';
 };
 
 // -- start ----------------------------------------------------------------------------------------

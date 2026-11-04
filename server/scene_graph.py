@@ -20,6 +20,9 @@ from pxr import Sdf, Usd
 CHILD_LIMIT = 500
 #: Prims listed by one expand-all before the rest is left collapsed.
 SUBTREE_LIMIT = 5000
+#: Find: results returned, and prims looked at before giving up.
+FIND_LIMIT = 200
+FIND_BUDGET = 500_000
 #: Stages kept open between requests: opening is the slow part.
 MAX_OPEN_STAGES = 3
 
@@ -122,6 +125,33 @@ class SceneGraph:
                 levels.append(level)
                 parent = prim
             return {"levels": levels, "path": str(target.GetPath())}
+
+    def find(self, query: str, limit: int = FIND_LIMIT, budget: int = FIND_BUDGET) -> dict[str, Any]:
+        """Prims whose name contains `query` (any case), shallowest first.
+
+        Walks the stage, so it reaches prims no one has expanded yet; it stops
+        after `budget` prims so a huge shot cannot stall the server.
+        """
+        needle = query.strip().lower()
+        if not needle:
+            return {"results": [], "truncated": False}
+        with STAGES.lock:
+            hits: list[Usd.Prim] = []
+            scanned = 0
+            truncated = False
+            for prim in Usd.PrimRange(self.stage.GetPseudoRoot(), PREDICATE):
+                if prim.IsPseudoRoot():
+                    continue
+                scanned += 1
+                if scanned > budget:
+                    truncated = True
+                    break
+                if needle in prim.GetName().lower():
+                    hits.append(prim)
+            hits.sort(key=lambda p: (p.GetPath().pathElementCount, str(p.GetPath())))
+            if len(hits) > limit:
+                truncated = True
+            return {"results": [_summary(p) for p in hits[:limit]], "truncated": truncated}
 
     def detail(self, prim_path: str) -> dict[str, Any]:
         with STAGES.lock:

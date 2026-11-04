@@ -79,7 +79,8 @@ python -m tests.make_scene sample_scene
 | Shift / Ctrl | 4x faster / 4x slower |
 | Click | Select the prim under the cursor (an instance picks its PointInstancer) |
 | F | Frame the selection, or the whole scene |
-| T / Esc | Scene graph, clear the selection |
+| Z | Shading: material, matcap, wireframe (also the three buttons in the top bar) |
+| T / I / Esc | Scene graph, scene info, clear the selection |
 | [ / ] | Previous / next variant of the default prim |
 | G / L / B / P | Grid, shadows, double-sided, proxy geometry |
 | I / O / ? | Inspector, open another scene, controls help |
@@ -112,7 +113,8 @@ A `.glb` file dropped on the page is loaded directly, without the server.
 is usd-refgraph's scene tree, in the same design: Houdini's Scene Graph Tree icons
 for each prim type (a kind's stars on Xforms and Scopes), connector lines,
 `over`s in italics, deactivated prims struck through, and reference, payload,
-variant and instance flags on the rows. It opens expanded (materials closed) and is
+variant and instance flags on the rows. It opens collapsed (Expand all opens it,
+materials stay closed) and is
 read a level at a time, so a heavy stage is never walked whole; arrow keys walk
 it, Shift-click or Shift+arrow expands or collapses a whole branch.
 
@@ -128,6 +130,14 @@ The tree is the stage as converted: same payloads, same variant selections.
 The Houdini icons in `web/vendor/houdini/` are SideFX's own SVGs, copied unchanged
 from usd-refgraph; check your Houdini licence before shipping this outside the
 studio.
+
+## Shading
+
+As in Blender's viewport, the three buttons at the top right (or **Z**) switch
+between the scene's own **materials**, a **matcap** and **wireframe**. Matcap puts
+one lit-sphere look on everything, to read form without textures; pick Clay,
+Studio, Ceramic, Metal, Red wax or Normals in the Display tab. Wireframe shows
+every edge of the meshes as drawn, see-through, without ground shadows.
 
 ## Variants
 

@@ -167,6 +167,13 @@ def test_scene_graph_api(client, scene_dir):
     assert ("my_scene/layers/layout.usda", "sublayer") in layers
     assert ("my_scene/assets/tower.usda", "payload") in layers
 
+    # find walks the whole stage, so it reaches prims nobody has expanded
+    found = client.get(f"{base}/find", params={"q": "CRATE_2"}).json()
+    paths = [p["path"] for p in found["results"]]
+    assert paths[:3] == ["/World/Crates/crate_2_0", "/World/Crates/crate_2_1", "/World/Crates/crate_2_2"]
+    assert not found["truncated"]
+    assert client.get(f"{base}/find", params={"q": ""}).json()["results"] == []
+
     assert client.get(f"{base}/prim", params={"path": "/World/Nope"}).status_code == 404
     assert client.get(f"{base}/prim", params={"path": "not a path"}).status_code == 400
     assert client.get("/api/scenes/doesnotexist/prims").status_code == 404
