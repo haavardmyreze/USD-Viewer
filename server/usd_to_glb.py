@@ -5,11 +5,14 @@ payload, sublayer, variant selection and instance is resolved exactly as USD
 defines it. We then walk the composed stage and write plain glTF that three.js
 can load reliably.
 
-Supported in this first pass:
-  * UsdGeomMesh (any polygon counts, holes, left-handed orientation)
-  * Cube, Sphere, Cylinder, Cone, Plane gprims
+Supported:
+  * UsdGeomMesh (any polygon counts, holes, left-handed orientation), with
+    Catmull-Clark refinement of subdivision surfaces (subdiv.py)
+  * Cube, Sphere, Cylinder, Cone, Capsule, Plane gprims
+  * BasisCurves as tubes or lines (curves.py), Points as instanced spheres
   * normals / st / displayColor primvars at any interpolation (indexed or not)
-  * UsdPreviewSurface materials incl. textures, GeomSubset material bindings
+  * MaterialX / UsdPreviewSurface networks compiled to GLSL (mtlx_glsl.py), with a
+    plain glTF material as fallback; GeomSubset material bindings
   * native instancing (shared glTF meshes)
   * PointInstancer (incl. nested), written as EXT_mesh_gpu_instancing
   * render / proxy purpose selection
@@ -21,6 +24,7 @@ from __future__ import annotations
 import io
 import math
 import os
+import re
 import threading
 import zipfile
 from collections import Counter
@@ -28,10 +32,12 @@ from collections import Counter
 import numpy as np
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, UsdUtils
 
-from . import exr
+from . import exr, mtlx_glsl
 from .glb import GlbBuilder
+from .subdiv import Refinement
+from . import curves as _curves
 
-CONVERTER_VERSION = "6"
+CONVERTER_VERSION = "7"
 
 # Level of detail: meshes with at least this many triangles get simplified
 # versions (each ~1/4 of the previous) that the viewer switches to by screen size.
@@ -41,13 +47,23 @@ LOD_LEVELS = 3
 
 # textures larger than this (longest side, px) are downscaled; 0 disables
 MAX_TEXTURE_SIZE = int(os.environ.get("USDV_MAX_TEXTURE_SIZE", "2048"))
+# UDIM tiles are packed into one atlas at most this many pixels wide / high
+UDIM_ATLAS_SIZE = int(os.environ.get("USDV_UDIM_ATLAS_SIZE", "4096"))
+# subdivision surfaces: levels of Catmull-Clark refinement, fewer for big meshes
+SUBDIV_LEVEL = int(os.environ.get("USDV_SUBDIV_LEVEL", "2"))
+SUBDIV_MAX_FACES = int(os.environ.get("USDV_SUBDIV_MAX_FACES", "400000"))
+# compile MaterialX / UsdPreviewSurface networks to GLSL for the viewer
+SHADER_GRAPHS = os.environ.get("USDV_SHADER_GRAPHS", "1") not in ("0", "false", "no", "off")
 
 PURPOSES = ("render", "proxy")
 
 # glTF sampler wrap modes
 REPEAT, CLAMP, MIRROR = 10497, 33071, 33648
 _COLOR_PURPOSES = ("baseColor", "emissive")
-_WRAP = {"repeat": REPEAT, "mirror": MIRROR, "clamp": CLAMP, "black": CLAMP}
+_WRAP = {"repeat": REPEAT, "mirror": MIRROR, "clamp": CLAMP, "black": CLAMP,
+         "periodic": REPEAT, "constant": CLAMP, "useMetadata": REPEAT}
+NEAREST, LINEAR = 9728, 9729
+NEAREST_MIPMAP_NEAREST, LINEAR_MIPMAP_LINEAR = 9984, 9987
 
 _DEFAULT_MATERIAL = {
     "name": "default",
@@ -59,7 +75,11 @@ _DEFAULT_MATERIAL = {
 }
 
 _SKIP_SUBTREE_TYPES = {"Material", "NodeGraph", "Shader", "GeomSubset"}
-_GPRIM_TYPES = {"Mesh", "Cube", "Sphere", "Cylinder", "Cone", "Plane"}
+_GPRIM_TYPES = {"Mesh", "Cube", "Sphere", "Cylinder", "Cylinder_1", "Cone", "Plane", "Capsule", "Capsule_1"}
+# curves swept into tubes up to this many triangles per prim, else drawn as lines
+CURVE_MAX_TRIANGLES = int(os.environ.get("USDV_CURVE_MAX_TRIANGLES", "3000000"))
+# points drawn as small spheres up to this many per prim, else as GL points
+POINTS_MAX_SPHERES = int(os.environ.get("USDV_POINTS_MAX_SPHERES", "250000"))
 _KNOWN_NON_GEOM = {
     "Xform", "Scope", "", "Camera", "SkelRoot", "Skeleton", "SkelAnimation",
     "DistantLight", "DomeLight", "SphereLight", "RectLight", "DiskLight",
@@ -215,6 +235,43 @@ def _weld(attrs: dict[str, np.ndarray]):
     return out, inverse.astype(np.uint32)
 
 
+def _tangents(attrs: dict[str, np.ndarray], index_buf: np.ndarray) -> np.ndarray:
+    """Per-vertex tangents (dP/du, w = handedness) from the welded UVs, as glTF TANGENT.
+
+    The UVs are glTF's (v flipped), so v is flipped back: the tangent follows +u and
+    the bitangent +v of the USD texture coordinates, as MaterialX expects.
+    """
+    pos = np.asarray(attrs["POSITION"], dtype=np.float64)
+    nrm = _normalize(np.asarray(attrs["NORMAL"], dtype=np.float64))
+    n = len(pos)
+    tan = np.zeros((n, 3))
+    bit = np.zeros((n, 3))
+    tri = np.asarray(index_buf, dtype=np.int64).reshape(-1, 3)
+    if "TEXCOORD_0" in attrs and len(tri):
+        uv = np.asarray(attrs["TEXCOORD_0"], dtype=np.float64).copy()
+        uv[:, 1] = 1.0 - uv[:, 1]
+        p0, p1, p2 = pos[tri[:, 0]], pos[tri[:, 1]], pos[tri[:, 2]]
+        t0, t1, t2 = uv[tri[:, 0]], uv[tri[:, 1]], uv[tri[:, 2]]
+        e1, e2 = p1 - p0, p2 - p0
+        d1, d2 = t1 - t0, t2 - t0
+        det = d1[:, 0] * d2[:, 1] - d2[:, 0] * d1[:, 1]
+        r = np.where(np.abs(det) > 1e-20, 1.0 / np.where(det == 0, 1.0, det), 0.0)[:, None]
+        ft = (e1 * d2[:, 1:2] - e2 * d1[:, 1:2]) * r
+        fb = (e2 * d1[:, 0:1] - e1 * d2[:, 0:1]) * r
+        for i in range(3):
+            np.add.at(tan, tri[:, i], ft)
+            np.add.at(bit, tri[:, i], fb)
+    # Gram-Schmidt against the normal; vertices without UV gradients get any perpendicular
+    t = tan - nrm * np.sum(tan * nrm, axis=1, keepdims=True)
+    bad = np.linalg.norm(t, axis=1) < 1e-12
+    if bad.any():
+        helper = np.where(np.abs(nrm[bad, 0:1]) < 0.9, [[1.0, 0.0, 0.0]], [[0.0, 1.0, 0.0]])
+        t[bad] = np.cross(nrm[bad], np.cross(helper, nrm[bad]))
+    t = _normalize(t)
+    w = np.where(np.sum(np.cross(nrm, t) * bit, axis=1) < 0, -1.0, 1.0)
+    return np.concatenate([t, w[:, None]], axis=1)
+
+
 # -- procedural gprims ------------------------------------------------------
 
 
@@ -288,6 +345,39 @@ def _gen_cylinder(r_bottom, r_top, height, seg=32):
     return np.array(pts), np.array(counts), np.array(idx)
 
 
+def _gen_capsule(r_bottom, r_top, height, seg=32, rings=8):
+    """A cylinder of `height` between two hemispheres (USD Capsule, Z axis)."""
+    h = height / 2.0
+    rows = []  # (radius, z) from the bottom pole to the top pole
+    for i in range(rings + 1):
+        a = -math.pi / 2 + (math.pi / 2) * i / rings
+        rows.append((r_bottom * math.cos(a), -h + r_bottom * math.sin(a)))
+    for i in range(rings + 1):
+        a = (math.pi / 2) * i / rings
+        rows.append((r_top * math.cos(a), h + r_top * math.sin(a)))
+    pts, counts, idx = [], [], []
+    for r, z in rows:
+        pts.extend((r * math.cos(2 * math.pi * k / seg), r * math.sin(2 * math.pi * k / seg), z) for k in range(seg))
+    for j in range(len(rows) - 1):
+        for k in range(seg):
+            n = (k + 1) % seg
+            counts.append(4)
+            idx.extend([j * seg + k, j * seg + n, (j + 1) * seg + n, (j + 1) * seg + k])
+    return np.array(pts), np.array(counts), np.array(idx)
+
+
+def _icosphere():
+    """Unit icosahedron (20 triangles): the shape of each point of a Points prim."""
+    t = (1 + 5 ** 0.5) / 2
+    v = np.array([(-1, t, 0), (1, t, 0), (-1, -t, 0), (1, -t, 0), (0, -1, t), (0, 1, t), (0, -1, -t), (0, 1, -t),
+                  (t, 0, -1), (t, 0, 1), (-t, 0, -1), (-t, 0, 1)], dtype=np.float64)
+    v /= np.linalg.norm(v, axis=1, keepdims=True)
+    f = np.array([(0, 11, 5), (0, 5, 1), (0, 1, 7), (0, 7, 10), (0, 10, 11), (1, 5, 9), (5, 11, 4), (11, 10, 2),
+                  (10, 7, 6), (7, 1, 8), (3, 9, 4), (3, 4, 2), (3, 2, 6), (3, 6, 8), (3, 8, 9), (4, 9, 5),
+                  (2, 4, 11), (6, 2, 10), (8, 6, 7), (9, 8, 1)], dtype=np.int64)
+    return v, f
+
+
 def _gen_plane(width, length):
     w, l = width / 2.0, length / 2.0
     pts = np.array([(-w, -l, 0), (w, -l, 0), (w, l, 0), (-w, l, 0)], dtype=np.float64)
@@ -345,6 +435,20 @@ class _TextureCache:
 _TEXTURE_CACHE = _TextureCache()
 
 
+def _to_8bit(img):
+    """16-bit and float PIL images to 8 bits per channel (Pillow's convert() clips them)."""
+    if img.mode in ("I;16", "I;16B", "I;16L", "I"):
+        arr = np.asarray(img, dtype=np.float64)
+        scale = 65535.0 if arr.max(initial=0) > 255 else 255.0
+        from PIL import Image
+        return Image.fromarray(np.clip(arr / scale * 255.0 + 0.5, 0, 255).astype(np.uint8), "L")
+    if img.mode == "F":
+        arr = np.asarray(img, dtype=np.float64)
+        from PIL import Image
+        return Image.fromarray(np.clip(arr * 255.0 + 0.5, 0, 255).astype(np.uint8), "L")
+    return img
+
+
 class _Converter:
     def __init__(self, stage: Usd.Stage, purpose: str = "render") -> None:
         self.stage = stage
@@ -365,6 +469,13 @@ class _Converter:
         self.predicate = Usd.TraverseInstanceProxies(Usd.PrimDefaultPredicate)
         self._active_protos: set[str] = set()
         self.lods: dict[int, list[int]] = {}  # mesh index -> LOD mesh indices
+        # shader graphs: what each glTF material needs from the meshes using it
+        self.material_reqs: dict[int, dict] = {}
+        self.pv_slots: dict[str, int] = {}  # primvar name -> _USDPV<n> attribute
+        self.glsl_chunks: dict[str, str] = {}
+        start = stage.GetStartTimeCode() if stage.HasAuthoredTimeCodeRange() else 1.0
+        self.frame = float(start)
+        self.fps = float(stage.GetFramesPerSecond() or 24.0)
         self.lod_groups: list[str] = []
         self.lod_nodes: list[int] = []
 
@@ -412,6 +523,17 @@ class _Converter:
                         m = m @ rel
                     path = prim.GetPath().pathString
                     out.append((path, mesh_index, m[None], n_tris, {"path": path}))
+            elif type_name == "BasisCurves":
+                result = self._curves_mesh(prim)
+                if result is not None:
+                    mesh_index, n_tris = result
+                    m = np.array(self.xf_cache.GetLocalToWorldTransform(prim), dtype=np.float64)
+                    if rel is not None:
+                        m = m @ rel
+                    path = prim.GetPath().pathString
+                    out.append((path, mesh_index, m[None], n_tris, {"path": path}))
+            elif type_name == "Points":
+                out.extend(self._points_items(prim, rel))
             elif type_name == "Camera":
                 self.stats["cameras"] += 1
             elif type_name not in _KNOWN_NON_GEOM and prim.IsA(UsdGeom.Gprim):
@@ -529,6 +651,8 @@ class _Converter:
         used = self.glb.gltf.setdefault("extensionsUsed", [])
         if "EXT_mesh_gpu_instancing" not in used:
             used.append("EXT_mesh_gpu_instancing")
+        if source.get("colors") is not None:
+            ext["attributes"]["_COLOR_0"] = self.glb.add_attribute(np.asarray(source["colors"])[:, :3], target=None)
         if ids is not None:
             # authored instance index per glTF instance (float: exact up to 2^24)
             extras["usdInstanceIds"] = self.glb.add_attribute(np.asarray(ids, dtype=np.float32), target=None)
@@ -575,8 +699,14 @@ class _Converter:
             lod_root = {**root, "name": "usd_stage_lods", "children": self.lod_nodes}
             self.glb.add_scene("usdv_lods", [self.glb.add_node(lod_root)])
 
+        if self.stats["subdiv_cages"]:
+            self.report.warn(f"{self.stats['subdiv_cages']} large subdivision mesh(es) shown as their control cage "
+                             f"(more than {SUBDIV_MAX_FACES} faces when refined; see USDV_SUBDIV_MAX_FACES)")
         for t, n in self.report.skipped_types.items():
             self.report.warn(f"{n} {t} prim(s) skipped (not supported yet)")
+
+        if self.glsl_chunks:
+            self.glb.gltf["extras"] = {"usdvGlsl": self.glsl_chunks}
 
         info = {
             "upAxis": str(up),
@@ -596,6 +726,10 @@ class _Converter:
                 "lodGroups": len(self.lod_groups),
                 "lodTriangles": self.stats["lod_triangles"],
                 "cameras": self.stats["cameras"],
+                "shaderGraphs": self.stats["shader_graphs"],
+                "subdividedMeshes": self.stats["subdivided"],
+                "curves": self.stats["curve_tubes"] + self.stats["curve_lines"],
+                "points": self.stats["points"],
             },
             "warnings": self.report.as_list(),
         }
@@ -632,9 +766,12 @@ class _Converter:
             pts, counts, idx = _gen_cube(get("size", 2.0))
         elif type_name == "Sphere":
             pts, counts, idx = _gen_sphere(get("radius", 1.0))
-        elif type_name == "Cylinder":
+        elif type_name in ("Cylinder", "Cylinder_1"):
             r = get("radius", 1.0)
             pts, counts, idx = _gen_cylinder(get("radiusBottom", r), get("radiusTop", r), get("height", 2.0))
+        elif type_name in ("Capsule", "Capsule_1"):
+            r = get("radius", 0.5)
+            pts, counts, idx = _gen_capsule(get("radiusBottom", r), get("radiusTop", r), get("height", 1.0))
         elif type_name == "Cone":
             pts, counts, idx = _gen_cylinder(get("radius", 1.0), 0.0, get("height", 2.0))
         elif type_name == "Plane":
@@ -696,7 +833,62 @@ class _Converter:
             self.mesh_cache[("tris", mesh_index)] = n_tris
         return mesh_index, self.mesh_cache[("tris", mesh_index)]
 
+    def _refinement(self, prim, counts, indices, n_points):
+        """Catmull-Clark refinement for a subdivision mesh, or None."""
+        if SUBDIV_LEVEL <= 0 or not prim.IsA(UsdGeom.Mesh):
+            return None
+        mesh = UsdGeom.Mesh(prim)
+        t = self.time
+        scheme = str(mesh.GetSubdivisionSchemeAttr().Get(t) or "catmullClark")
+        if scheme == "none":
+            return None
+        level = SUBDIV_LEVEL
+        while level > 0 and len(indices) * 4 ** (level - 1) > SUBDIV_MAX_FACES:
+            level -= 1
+        if level == 0:
+            self.stats["subdiv_cages"] += 1
+            return None
+
+        def get(attr):
+            v = attr.Get(t)
+            return np.array(v) if v else None
+
+        try:
+            ref = Refinement(n_points, counts, indices, level, scheme=scheme,
+                             boundary=str(mesh.GetInterpolateBoundaryAttr().Get(t) or "edgeAndCorner"),
+                             crease_indices=get(mesh.GetCreaseIndicesAttr()),
+                             crease_lengths=get(mesh.GetCreaseLengthsAttr()),
+                             crease_sharpness=get(mesh.GetCreaseSharpnessesAttr()),
+                             corner_indices=get(mesh.GetCornerIndicesAttr()),
+                             corner_sharpness=get(mesh.GetCornerSharpnessesAttr()))
+        except (ValueError, IndexError, MemoryError) as exc:
+            self.report.warn(f"{_display(prim.GetPath().pathString)}: subdivision failed ({exc}); showing the cage")
+            return None
+        self.stats["subdivided"] += 1
+        return ref
+
     def _build_mesh(self, prim, path, points, counts, indices, holes, smooth, left, face_group, group_keys):
+        refine = self._refinement(prim, counts, indices, len(points)) if smooth else None
+        n_points0, n_corners0, n_faces0 = len(points), len(indices), len(counts)
+        if refine is not None:
+            points = refine.vertex(points)
+            counts, indices = refine.counts, refine.indices
+            if len(holes):
+                holes = np.nonzero(np.isin(refine.parent_face, holes))[0]
+            face_group = face_group[refine.parent_face]
+
+        def prep(values, interp):
+            """Primvars authored on the cage, carried through the refinement."""
+            if refine is None or values is None or len(values) == 0:
+                return values
+            if interp in ("vertex", "varying") and len(values) >= n_points0:
+                return refine.vertex(values[:n_points0])
+            if interp == "faceVarying" and len(values) >= n_corners0:
+                return refine.facevarying(values[:n_corners0])
+            if interp == "uniform" and len(values) >= n_faces0:
+                return refine.uniform(values[:n_faces0])
+            return values
+
         corners, face_of_tri = _triangulate(counts)
         if len(holes):
             keep = ~np.isin(face_of_tri, holes)
@@ -710,13 +902,14 @@ class _Converter:
         face_idx = np.repeat(face_of_tri, 3)
         point_idx = indices[corner_idx]
         n_points, n_corners, n_faces = len(points), len(indices), len(counts)
-        expand = lambda v, i: _expand(v, i, n_points, n_corners, n_faces, point_idx, corner_idx, face_idx)
+        expand = lambda v, i: _expand(prep(v, i), i, n_points, n_corners, n_faces, point_idx, corner_idx, face_idx)
 
         attrs = {"POSITION": points[point_idx]}
 
-        # normals: primvars:normals wins over the normals attribute
-        normals, n_interp = self._primvar(prim, "normals")
-        if normals is None and prim.IsA(UsdGeom.PointBased):
+        # normals: primvars:normals wins over the normals attribute; a subdivision
+        # surface ignores authored normals (as USD specifies)
+        normals, n_interp = (None, None) if refine is not None else self._primvar(prim, "normals")
+        if normals is None and refine is None and prim.IsA(UsdGeom.PointBased):
             pb = UsdGeom.PointBased(prim)
             raw = pb.GetNormalsAttr().Get(self.time)
             if raw:
@@ -757,6 +950,19 @@ class _Converter:
             if colors is not None:
                 attrs["COLOR_0"] = np.clip(colors[:, :3], 0, 1)
 
+        # primvars and tangents that the materials' shader graphs read
+        materials = [self._material_for_key(key) for key in group_keys]
+        reqs = [self.material_reqs.get(m, {}) for m in materials]
+        for attr, name in sorted({a: n for r in reqs for a, n in r.get("attributes", {}).items()}.items()):
+            vals, interp = self._graph_primvar(prim, name)
+            v = expand(vals, interp)
+            if v is None:
+                continue
+            v = np.asarray(v, dtype=np.float64).reshape(len(v), -1)[:, :4]
+            if v.shape[1] < 4:  # w = 0 marks "present" (a missing attribute reads (0, 0, 0, 1))
+                v = np.concatenate([v, np.zeros((len(v), 4 - v.shape[1]))], axis=1)
+            attrs[attr.upper()] = v
+
         n_tris = len(corners)
         primitives = []
         lod_sources = []
@@ -766,15 +972,20 @@ class _Converter:
             if len(sel) == 0:
                 continue
             corner_sel = (sel[:, None] * 3 + np.arange(3)).reshape(-1)
-            sub = {k: np.asarray(v)[corner_sel] for k, v in attrs.items()}
+            req = reqs[g]
+            wanted = {a.upper() for a in req.get("attributes", {})}
+            sub = {k: np.asarray(v)[corner_sel] for k, v in attrs.items()
+                   if not k.startswith("_USDPV") or k in wanted}
             if "COLOR_0" in sub and not (key[0] == "displayColor" and key[2]):
                 del sub["COLOR_0"]
             welded, index_buf = _weld(sub)
+            if req.get("tangents"):
+                welded["TANGENT"] = _tangents(welded, index_buf)
             prim_attrs = {k: self.glb.add_attribute(v) for k, v in welded.items()}
             primitives.append({
                 "attributes": prim_attrs,
                 "indices": self.glb.add_indices(index_buf),
-                "material": self._material_for_key(key),
+                "material": materials[g],
                 "mode": 4,
             })
             lod_sources.append((welded, index_buf, primitives[-1]))
@@ -782,6 +993,163 @@ class _Converter:
         if LOD_ENABLED and n_tris >= LOD_MIN_TRIANGLES:
             self.lods[mesh_index] = self._build_lods(path, lod_sources)
         return mesh_index, n_tris
+
+    # -- curves and points ------------------------------------------------
+
+    def _shared_key(self, prim, key):
+        proto = prim.GetPrimInPrototype().GetPath().pathString if prim.IsInstanceProxy() else prim.GetPath().pathString
+        return (proto, key)
+
+    def _curves_mesh(self, prim):
+        """A BasisCurves prim as tubes of its widths (or lines without widths)."""
+        t = self.time
+        bc = UsdGeom.BasisCurves(prim)
+        pts = bc.GetPointsAttr().Get(t)
+        counts = bc.GetCurveVertexCountsAttr().Get(t)
+        if not pts or not counts:
+            return None
+        path = prim.GetPath().pathString
+        mat_key = self._material_key(prim, prim, True)
+        cache_key = self._shared_key(prim, ("curves", mat_key))
+        if cache_key in self.mesh_cache:
+            return self.mesh_cache[cache_key]
+        pts = np.array(pts, dtype=np.float64)
+        counts = np.array(counts, dtype=np.int64)
+        if counts.sum() != len(pts):
+            self.report.warn(f"{_display(path)}: curveVertexCounts do not match the points; skipped")
+            return None
+        ctype = str(bc.GetTypeAttr().Get(t) or "cubic")
+        basis = str(bc.GetBasisAttr().Get(t) or "bezier")
+        wrap = str(bc.GetWrapAttr().Get(t) or "nonperiodic")
+        widths, w_interp = self._primvar(prim, "widths")
+        if widths is None:
+            w = bc.GetWidthsAttr().Get(t)
+            widths, w_interp = (np.array(w, dtype=np.float64), bc.GetWidthsInterpolation()) if w else (None, None)
+        colors, c_interp = self._primvar(prim, "displayColor", inherited=True)
+        n_curves = len(counts)
+
+        vertex_data = []
+        if widths is not None and w_interp in ("vertex",) and len(widths) >= len(pts):
+            vertex_data.append(widths[:len(pts)])
+        if colors is not None and c_interp in ("vertex",) and len(colors) >= len(pts):
+            vertex_data.append(colors[:len(pts)])
+        P, curve, data, param = _curves.polylines(pts, counts, ctype, basis, wrap, vertex_data)
+        if len(P) < 2:
+            return None
+        di = 0
+        radius = None
+        if widths is not None:
+            if w_interp == "vertex" and len(widths) >= len(pts):
+                radius = data[di][:, 0] * 0.5
+                di += 1
+            elif w_interp == "uniform" and len(widths) >= n_curves:
+                radius = widths[curve] * 0.5
+            elif w_interp == "varying" and len(widths) > 1:
+                # one width per segment end: interpolate along each curve
+                starts = np.r_[0, np.cumsum(self._varying_counts(counts, ctype, basis, wrap))[:-1]]
+                nvar = self._varying_counts(counts, ctype, basis, wrap)
+                f = param * np.maximum(nvar[curve] - 1, 0)
+                i0 = np.minimum(np.floor(f).astype(np.int64), np.maximum(nvar[curve] - 1, 0))
+                i1 = np.minimum(i0 + 1, np.maximum(nvar[curve] - 1, 0))
+                idx0 = np.clip(starts[curve] + i0, 0, len(widths) - 1)
+                idx1 = np.clip(starts[curve] + i1, 0, len(widths) - 1)
+                radius = (widths[idx0] + (widths[idx1] - widths[idx0]) * (f - i0)) * 0.5
+            else:
+                radius = np.full(len(P), float(widths[0]) * 0.5)
+        col = None
+        if colors is not None:
+            if c_interp == "vertex" and len(colors) >= len(pts):
+                col = data[di]
+            elif c_interp == "uniform" and len(colors) >= n_curves:
+                col = colors[curve]
+        material = self._material_for_key(mat_key)
+        n_lines = int((curve[1:] == curve[:-1]).sum())
+        sides = 6 if n_lines * 12 <= CURVE_MAX_TRIANGLES else 3
+        if radius is not None and n_lines * sides * 2 <= CURVE_MAX_TRIANGLES and np.nanmax(radius) > 0:
+            pos, nrm, tris, src = _curves.tubes(P, curve, radius, sides)
+            attrs = {"POSITION": self.glb.add_attribute(pos), "NORMAL": self.glb.add_attribute(nrm)}
+            if col is not None:
+                attrs["COLOR_0"] = self.glb.add_attribute(np.clip(col[src, :3], 0, 1))
+            prim_def = {"attributes": attrs, "indices": self.glb.add_indices(tris), "material": material, "mode": 4}
+            n_tris = len(tris)
+            self.stats["curve_tubes"] += 1
+        else:
+            seg = _curves.line_segments(curve)
+            attrs = {"POSITION": self.glb.add_attribute(P)}
+            if col is not None:
+                attrs["COLOR_0"] = self.glb.add_attribute(np.clip(col[:, :3], 0, 1))
+            prim_def = {"attributes": attrs, "indices": self.glb.add_indices(seg), "material": material, "mode": 1}
+            n_tris = 0
+            self.stats["curve_lines"] += 1
+        mesh_index = self.glb.add_mesh(path, [prim_def])
+        self.mesh_cache[cache_key] = (mesh_index, n_tris)
+        self.stats["unique_triangles"] += n_tris
+        return mesh_index, n_tris
+
+    @staticmethod
+    def _varying_counts(counts, ctype, basis, wrap):
+        """Values per curve for varying primvars: one per segment end."""
+        if ctype != "cubic":
+            return counts if wrap != "periodic" else counts
+        if basis == "bezier":
+            segs = (counts // 3) if wrap == "periodic" else (counts - 1) // 3
+        else:
+            segs = counts if wrap == "periodic" else (counts - 1 if wrap == "pinned" else counts - 3)
+        return np.maximum(segs + (0 if wrap == "periodic" else 1), 1)
+
+    def _points_items(self, prim, rel):
+        """A Points prim: one small sphere per point (instanced), or GL points when there are very many."""
+        t = self.time
+        pp = UsdGeom.Points(prim)
+        pts = pp.GetPointsAttr().Get(t)
+        if not pts:
+            return []
+        path = prim.GetPath().pathString
+        pts = np.array(pts, dtype=np.float64)
+        n = len(pts)
+        widths, w_interp = self._primvar(prim, "widths")
+        if widths is None:
+            w = pp.GetWidthsAttr().Get(t)
+            widths, w_interp = (np.array(w, dtype=np.float64), pp.GetWidthsInterpolation()) if w else (None, None)
+        if widths is not None and len(widths) >= n and w_interp in ("vertex", "varying"):
+            radius = widths[:n] * 0.5
+        else:
+            radius = np.full(n, (float(widths[0]) if widths is not None and len(widths) else 1.0) * 0.5)
+        colors, c_interp = self._primvar(prim, "displayColor", inherited=True)
+        per_point = colors is not None and len(colors) >= n and c_interp in ("vertex", "varying")
+        bound, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
+        if per_point and not bound:
+            mat_key = ("displayColor", (1.0, 1.0, 1.0, 1.0), False, False)
+        else:
+            mat_key = self._material_key(prim, prim, False)
+        world = np.array(self.xf_cache.GetLocalToWorldTransform(prim), dtype=np.float64)
+        if rel is not None:
+            world = world @ rel
+        self.stats["points"] += n
+
+        if n > POINTS_MAX_SPHERES:
+            attrs = {"POSITION": self.glb.add_attribute(pts)}
+            if per_point:
+                attrs["COLOR_0"] = self.glb.add_attribute(np.clip(colors[:n, :3], 0, 1))
+            mesh = self.glb.add_mesh(path, [{"attributes": attrs, "material": self._material_for_key(mat_key),
+                                             "mode": 0}])
+            return [(path, mesh, world[None], 0, {"path": path})]
+
+        cache_key = ("point-sphere", mat_key)
+        if cache_key not in self.mesh_cache:
+            v, f = _icosphere()
+            prim_def = {"attributes": {"POSITION": self.glb.add_attribute(v), "NORMAL": self.glb.add_attribute(v)},
+                        "indices": self.glb.add_indices(f), "material": self._material_for_key(mat_key), "mode": 4}
+            self.mesh_cache[cache_key] = self.glb.add_mesh("point", [prim_def])
+        mats = np.zeros((n, 4, 4))
+        mats[:, 0, 0] = mats[:, 1, 1] = mats[:, 2, 2] = np.maximum(radius, 1e-12)
+        mats[:, 3, :3] = pts
+        mats[:, 3, 3] = 1.0
+        mats = mats @ world
+        source = {"path": path, "ids": np.arange(n)}
+        if per_point:
+            source["colors"] = np.clip(colors[:n], 0, 1)
+        return [(path, self.mesh_cache[cache_key], mats, 20, source)]
 
     # -- level of detail ---------------------------------------------------
 
@@ -804,11 +1172,12 @@ class _Converter:
             points, inv = np.unique(pos, axis=0, return_inverse=True)
             inv = inv.reshape(-1)
             extra = {}
-            for k in ("TEXCOORD_0", "COLOR_0"):
-                if k in attrs:
-                    v = np.zeros((len(points), attrs[k].shape[1]), dtype=np.float32)
-                    v[inv] = attrs[k]
-                    extra[k] = v
+            for k in attrs:
+                if k in ("POSITION", "NORMAL"):
+                    continue
+                v = np.zeros((len(points), attrs[k].shape[1]), dtype=np.float32)
+                v[inv] = attrs[k]
+                extra[k] = v
             tris = inv[np.asarray(index_buf, dtype=np.int64).reshape(-1, 3)]
             current.append({"points": points, "tris": tris, "extra": extra, "last": prim, "keep": False})
 
@@ -849,6 +1218,9 @@ class _Converter:
                 attrs = {"POSITION": self.glb.add_attribute(c["points"]),
                          "NORMAL": self.glb.add_attribute(normals)}
                 for k, v in c["extra"].items():
+                    if k == "TANGENT":  # keep it orthogonal to the new normals
+                        t = v[:, :3] - normals * np.sum(v[:, :3] * normals, axis=1, keepdims=True)
+                        v = np.concatenate([_normalize(t), np.where(v[:, 3:] < 0, -1.0, 1.0)], axis=1)
                     attrs[k] = self.glb.add_attribute(v)
                 prim = {"attributes": attrs, "indices": self.glb.add_indices(c["tris"]),
                         "material": c["last"]["material"], "mode": 4}
@@ -918,6 +1290,13 @@ class _Converter:
         if idx is None:
             idx = self.glb.add_material(mat)
             self.material_index[("sig", sig)] = idx
+            graph = mat.get("extras", {}).get("usdvShader")
+            if graph:
+                self.material_reqs[idx] = {
+                    "attributes": graph["attributes"],
+                    "tangents": bool({"Tobject", "Tworld", "Bobject", "Bworld"} & set(graph["needs"])),
+                }
+                self.stats["shader_graphs"] += 1
         self.material_index[key] = idx
         return idx
 
@@ -1183,6 +1562,185 @@ class _Converter:
 
     def _convert_material(self, mat_path):
         material = UsdShade.Material.Get(self.stage, mat_path)
+        graph = self._graph_shader(material, mat_path) if SHADER_GRAPHS else None
+        if graph is None:
+            return self._plain_material(material, mat_path)
+        # the plain glTF material stays as the fallback (other glTF viewers, or a
+        # shader the browser cannot compile); its approximation warnings don't apply
+        report, self.report = self.report, _Report()
+        try:
+            out = self._plain_material(material, mat_path)
+        finally:
+            self.report = report
+        out.setdefault("extras", {}).pop("usdvTriplanar", None)
+        out["extras"]["usdvShader"] = graph
+        return out
+
+    # -- shader graphs -----------------------------------------------------
+
+    def _graph_shader(self, material, mat_path):
+        """The material's MaterialX / UsdPreviewSurface network as GLSL, or None."""
+        lib = mtlx_glsl.Library.get()
+        if lib is None or not material:
+            return None
+        warns = []
+        net = mtlx_glsl.UsdNetwork(lib, self.time, warns.append)
+        surf = mtlx_glsl.surface_node(material, net)
+        label = f"Material {_display(mat_path)}"
+        if surf is None:
+            for w in warns:
+                self.report.warn(f"{label}: {w}")
+            return None
+        try:
+            res = mtlx_glsl.generate(surf, texture_cb=lambda info: self._graph_texture(info, mat_path),
+                                     primvar_cb=self._primvar_slot, frame=self.frame, fps=self.fps)
+        except mtlx_glsl.GenError as e:
+            self.report.warn(f"{label}: {e}; shown with simplified shading")
+            return None
+        for w in warns + res.warnings:
+            self.report.warn(f"{label}: {w}")
+        for key, text in res.chunks:
+            self.glsl_chunks[key] = text
+        return {
+            "v": 1,
+            "key": res.key,
+            "surface": surf.nd.getNodeString(),
+            "chunks": [k for k, _ in res.chunks],
+            "main": res.main,
+            "params": res.params,
+            "needs": sorted(res.needs),
+            "attributes": res.attributes,
+            "textures": [{"uniform": t["uniform"], "index": t["texture"]} for t in res.textures],
+            "uniforms": res.uniforms,
+            "features": res.features,
+        }
+
+    def _primvar_slot(self, name: str, mtype: str) -> str:
+        """Attribute that carries a primvar for shader graphs (three.js lower-cases glTF names)."""
+        n = self.pv_slots.setdefault(name, len(self.pv_slots))
+        return f"_usdpv{n}"
+
+    def _graph_primvar(self, prim, name):
+        """A primvar a shader graph reads, with the usual aliases for extra UV sets."""
+        names = [name]
+        m = re.fullmatch(r"st(\d+)", name)
+        if m:
+            i = int(m.group(1))
+            names += [f"uv{i}", f"st_{i}", f"map{i + 1}", f"UVMap{i}"]
+        inherited = name in ("displayColor", "displayOpacity")
+        for n in names:
+            vals, interp = self._primvar(prim, n, inherited=inherited)
+            if vals is not None:
+                return vals, interp
+        return None, None
+
+    def _graph_texture(self, info, mat_path):
+        """Register an image a shader graph samples: {"texture", "transform", "udim"} or None.
+
+        Images are stored as they are (8-bit) and decoded in the shader, as MaterialX
+        does: "transform" names the colour space conversion to linear Rec.709.
+        """
+        asset = info["asset"]
+        authored = asset.path if isinstance(asset, Sdf.AssetPath) else str(asset)
+        resolved = asset.resolvedPath if isinstance(asset, Sdf.AssetPath) else None
+        color = bool(info["color"])
+        cs = info.get("colorspace")
+        wrap_s = _WRAP.get(str(info.get("wrapS")), REPEAT)
+        wrap_t = _WRAP.get(str(info.get("wrapT")), REPEAT)
+        nearest = str(info.get("filter")) == "closest"
+        # colour data tagged raw is not colour managed (MaterialX applies no transform)
+        if exr.classify_colorspace(cs) == "raw":
+            color = False
+        if "<UDIM>" in authored or "<UVTILE>" in authored:
+            return self._udim_texture(info, authored, mat_path, color, cs, nearest)
+        is_float = os.path.splitext(authored)[1].lower() in (".exr", ".hdr")
+        t = {"path": resolved or None, "authored": authored, "colorSpace": cs,
+             "wrapS": wrap_s, "wrapT": wrap_t, "nearest": nearest}
+        ref = self._texture_ref(t, mat_path, "baseColor" if color else "data")
+        if ref is None:
+            return None
+        return {"texture": ref["index"], "transform": self._decode_for(cs, color, is_float)}
+
+    @staticmethod
+    def _decode_for(cs, color, encoded_srgb):
+        """MaterialX colour transform node (<name>_to_lin_rec709) for an image, or None."""
+        if not color:
+            return None
+        if encoded_srgb:  # float images were sRGB-encoded (and moved to Rec.709) when quantised
+            return "srgb_texture"
+        name = (cs or "").strip()
+        mx_names = ("srgb_texture", "g22_rec709", "g18_rec709", "rec709_display", "acescg", "g22_ap1",
+                    "lin_adobergb", "adobergb", "srgb_displayp3", "lin_displayp3")
+        if name in mx_names:
+            return name
+        kind = exr.classify_colorspace(name)
+        if kind in ("raw", "linear"):
+            return None
+        if kind == "acescg":
+            return "acescg"
+        return "srgb_texture"  # sRGB, or "auto": 8-bit colour images are sRGB (as Karma and Storm read them)
+
+    def _udim_texture(self, info, authored, mat_path, color, cs, nearest):
+        """UDIM tiles packed into one atlas (tile u, v at column u, row v from the bottom)."""
+        import glob
+
+        anchor = info.get("anchor")
+        pattern = authored.replace("<UVTILE>", "<UDIM>")
+        try:
+            absolute = anchor.ComputeAbsolutePath(pattern) if anchor is not None else pattern
+        except Exception:  # noqa: BLE001
+            absolute = pattern
+        if absolute.endswith("]"):
+            self.report.warn(f"UDIM textures inside packages are not supported: {authored}")
+            return None
+        head, _, tail = absolute.partition("<UDIM>")
+        tiles = {}
+        for f in glob.glob(glob.escape(head) + "[1-9][0-9][0-9][0-9]" + glob.escape(tail)):
+            num = f[len(head):len(head) + 4]
+            if num.isdigit() and int(num) >= 1001:
+                k = int(num) - 1001
+                tiles[(k % 10, k // 10)] = f
+        if not tiles:
+            self.report.warn(f"Texture not found: {authored} (no UDIM tiles; material {_display(mat_path)})")
+            return None
+        cols = max(u for u, _ in tiles) + 1
+        rows = max(v for _, v in tiles) + 1
+        is_float = os.path.splitext(tail)[1].lower() in (".exr", ".hdr")
+        purpose = "baseColor" if color else "data"
+
+        def produce():
+            from PIL import Image
+            imgs = {}
+            for uv, f in sorted(tiles.items()):
+                img = self._load_pil({"path": f, "authored": os.path.basename(f), "colorSpace": cs}, mat_path, purpose)
+                if img is not None:
+                    imgs[uv] = _to_8bit(img)
+            if not imgs:
+                return None
+            first = next(iter(imgs.values()))
+            limit = max(1, (UDIM_ATLAS_SIZE or 4096) // max(cols, rows))
+            ts = min(max(first.size), limit)
+            mode = "RGBA" if any("A" in i.getbands() for i in imgs.values()) else "RGB"
+            atlas = Image.new(mode, (ts * cols, ts * rows))
+            for (u, v), img in imgs.items():
+                tile = img.convert(mode).resize((ts, ts), Image.Resampling.LANCZOS)
+                atlas.paste(tile, (u * ts, (rows - 1 - v) * ts))
+            buf = io.BytesIO()
+            if mode == "RGBA":
+                atlas.save(buf, format="PNG")
+                return buf.getvalue(), "image/png"
+            atlas.save(buf, format="JPEG", quality=92, subsampling=0)
+            return buf.getvalue(), "image/jpeg"
+
+        key = ("udim", absolute, color, tuple(sorted(tiles.items())))
+        image = self._image_from_key(key, produce)
+        if image is None:
+            return None
+        sampler = self.glb.add_sampler(CLAMP, CLAMP, nearest=nearest)
+        return {"texture": self.glb.add_texture(image, sampler), "transform": self._decode_for(cs, color, is_float),
+                "udim": (cols, rows)}
+
+    def _plain_material(self, material, mat_path):
         out = {"name": mat_path}
         pbr = {"baseColorFactor": [0.7, 0.7, 0.7, 1.0], "metallicFactor": 0.0, "roughnessFactor": 0.5}
         out["pbrMetallicRoughness"] = pbr
@@ -1376,14 +1934,15 @@ class _Converter:
             img = self._load_pil(info, mat_path, purpose)
             if img is None:
                 return None
-            return self._encode(img.convert("RGBA" if "A" in img.getbands() else "RGB"))
+            img = _to_8bit(img)
+            return self._encode(img if img.mode in ("L", "LA") else img.convert("RGBA" if "A" in img.getbands() else "RGB"))
 
         # the same float file can need a different 8-bit encoding per role
         image = self._image_from_key(("file", info["path"], purpose in _COLOR_PURPOSES, purpose == "normal"),
                                      produce)
         if image is None:
             return None
-        sampler = self.glb.add_sampler(info["wrapS"], info["wrapT"])
+        sampler = self.glb.add_sampler(info["wrapS"], info["wrapT"], nearest=info.get("nearest", False))
         return {"index": self.glb.add_texture(image, sampler)}
 
     @staticmethod
@@ -1505,9 +2064,26 @@ def variant_session_layer(variants: dict | None):
     return session
 
 
+def refresh_layers() -> None:
+    """Reload layers that changed on disk.
+
+    USD keeps every layer that an open stage uses in memory (the scene graph keeps a
+    few stages open), and Sdf.Layer.FindOrOpen returns that copy even after the file
+    was edited. Reload() without force only re-reads files whose timestamp changed.
+    """
+    for layer in Sdf.Layer.GetLoadedLayers():
+        if layer.anonymous or layer.dirty or not layer.realPath:
+            continue
+        try:
+            layer.Reload()
+        except Exception:  # noqa: BLE001 - a vanished file is reported when it is opened
+            pass
+
+
 def open_stage(root_path: str, variants: dict | None = None):
     if not os.path.isfile(root_path):
         raise ConversionError(f"Root layer not found: {root_path}")
+    refresh_layers()
     try:
         stage = Usd.Stage.Open(Sdf.Layer.FindOrOpen(root_path), variant_session_layer(variants),
                                Usd.Stage.LoadAll)

@@ -6,3 +6,4 @@ numpy==2.5.4
 pillow==13.0.0
 fast-simplification==0.1.13
 OpenEXR==3.5.3
+MaterialX==1.39.5
