@@ -8,6 +8,7 @@ import { PivotGizmo } from './pivot.js';
 import { Selection } from './selection.js';
 import { ShadingMaterials } from './shading.js';
 import { applyTriplanarToScene } from './triplanar.js';
+import { applyShaderGraphs, workingMaterial } from './mtlx.js';
 
 const SUN_DIRECTION = new THREE.Vector3(0.55, 0.7, 0.4).normalize();
 /** Detail presets: multiplier on the screen size at which lower LODs kick in. */
@@ -100,6 +101,7 @@ export class Viewer {
     const gltf = await this.loader.loadAsync(url, (e) => {
       if (e.lengthComputable) onProgress?.(e.loaded / e.total);
     });
+    gltf.userData.shaderGraphs = await applyShaderGraphs(gltf);
     for (const s of gltf.scenes) applyTriplanarToScene(s);
     await resolveInstanceIds(gltf);
     this.setModel(gltf, options);
@@ -174,7 +176,24 @@ export class Viewer {
     this.lod.showAllLevels();
     this.camera.updateMatrixWorld();
     this._updateClipPlanes();
+    // compile the scene's own materials too while another shading mode shows, and put
+    // the plain glTF material back where a generated shader did not compile
+    const shown = new Map();
+    for (const [mesh, own] of this._originalMaterials) {
+      shown.set(mesh, mesh.material);
+      mesh.material = own;
+    }
     this.renderer.compile(this.scene, this.camera);
+    this.failedShaders = new Set();
+    for (const [mesh, own] of this._originalMaterials) {
+      const ok = workingMaterial(this.renderer, own);
+      for (const [a, b] of (Array.isArray(own) ? own.map((m, i) => [m, ok[i]]) : [[own, ok]])) {
+        if (a !== b) this.failedShaders.add(a.name);
+      }
+      this._originalMaterials.set(mesh, ok);
+      mesh.material = shown.get(mesh) === own ? ok : shown.get(mesh);
+    }
+    if (this.failedShaders.size) this.renderer.compile(this.scene, this.camera);
     this.renderer.render(this.scene, this.camera);
   }
 

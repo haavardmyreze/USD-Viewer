@@ -270,6 +270,9 @@ function showReport(report) {
   // problems, in plain words
   const missing = report?.unresolved || [];
   const warnings = report ? [...report.compositionErrors, ...report.warnings] : [];
+  for (const m of viewer.failedShaders || []) {
+    warnings.push(`Material ${m}: its shading network did not compile in this browser; shown with simplified shading`);
+  }
   const issues = [];
   if (missing.length) {
     const advice = report?.source === 'upload'

@@ -60,7 +60,8 @@ class StageCache:
             try:
                 # opened like the conversion (payloads loaded, the same variant
                 # selections), so the tree shows what is rendered
-                from .usd_to_glb import variant_session_layer
+                from .usd_to_glb import refresh_layers, variant_session_layer
+                refresh_layers()
                 stage = Usd.Stage.Open(Sdf.Layer.FindOrOpen(root_path), variant_session_layer(variants),
                                        Usd.Stage.LoadAll)
             except Exception as exc:  # noqa: BLE001
