@@ -79,7 +79,7 @@ python -m tests.make_scene sample_scene
 | Shift / Ctrl | 4x faster / 4x slower |
 | Click | Select the prim under the cursor (an instance picks its PointInstancer) |
 | F | Frame the selection, or the whole scene |
-| Z | Shading: material, matcap, wireframe (also the three buttons in the top bar) |
+| Z | Shading: material, no material, matcap (also the three buttons in the top bar) |
 | T / I / Esc | Scene graph, scene info, clear the selection |
 | [ / ] | Previous / next variant of the default prim |
 | G / L / B / P | Grid, shadows, double-sided, proxy geometry |
@@ -134,10 +134,11 @@ studio.
 ## Shading
 
 As in Blender's viewport, the three buttons at the top right (or **Z**) switch
-between the scene's own **materials**, a **matcap** and **wireframe**. Matcap puts
-one lit-sphere look on everything, to read form without textures; pick Clay,
-Studio, Ceramic, Metal, Red wax or Normals in the Display tab. Wireframe shows
-every edge of the meshes as drawn, see-through, without ground shadows.
+between the scene's own **materials**, **no material** and a **matcap**. No material
+shows everything in one neutral grey, still lit by the sun and environment and
+casting shadows, to judge form and lighting without textures (Blender's Solid
+mode). Matcap puts one lit-sphere look on everything, independent of the lighting;
+pick Clay, Studio, Ceramic, Metal, Red wax or Normals in the Display tab.
 
 ## Variants
 

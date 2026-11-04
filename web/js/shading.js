@@ -1,5 +1,6 @@
 // Viewport shading, as in Blender's viewport: the scene's own materials, a
-// matcap (one lit-sphere image for everything, to read form), or wireframe.
+// plain grey without the materials (lit by the scene, like Blender's Solid
+// mode), or a matcap (one lit-sphere image for everything, to read form).
 //
 // The matcaps are painted here on a canvas rather than shipped as images: a
 // lit sphere is a few lines of shading maths, and this keeps them crisp at any
@@ -111,7 +112,8 @@ export function matcap(id) {
   return cache.get(entry.id);
 }
 
-export const SHADING_MODES = ['material', 'matcap', 'wireframe'];
+/** In the order Z cycles through them. */
+export const SHADING_MODES = ['material', 'plain', 'matcap'];
 
 /** Shared materials, one per mode, look and face side. */
 export class ShadingMaterials {
@@ -123,12 +125,13 @@ export class ShadingMaterials {
     const key = `${mode}:${mode === 'matcap' ? look : ''}:${side}`;
     let m = this.materials.get(key);
     if (!m) {
-      m = mode === 'matcap'
-        ? new THREE.MeshMatcapMaterial({ matcap: matcap(look).texture, side })
-        : new THREE.MeshBasicMaterial({
-          color: 0xc6d0de, wireframe: true, transparent: true, opacity: 0.32, depthWrite: false, side: THREE.DoubleSide,
-        });
-      m.toneMapped = false; // like Blender: exposure does not change the matcap or the lines
+      if (mode === 'matcap') {
+        m = new THREE.MeshMatcapMaterial({ matcap: matcap(look).texture, side });
+        m.toneMapped = false; // like Blender: exposure does not change the matcap
+      } else {
+        // no material: one neutral grey, lit by the sun and environment, with shadows
+        m = new THREE.MeshStandardMaterial({ color: 0xbfbfbf, roughness: 0.62, metalness: 0, side });
+      }
       m.userData.usdvShading = true;
       this.materials.set(key, m);
     }

@@ -633,7 +633,7 @@ $('opt-proxy').addEventListener('change', () => {
   togglePurpose();
 });
 
-// -- viewport shading: material · matcap · wireframe ----------------------------------
+// -- viewport shading: material · no material · matcap---------------------------------
 
 function setShading(mode, look = settings.matcap || 'clay') {
   if (!SHADING_MODES.includes(mode)) mode = 'material';

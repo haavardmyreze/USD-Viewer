@@ -238,7 +238,7 @@ export class Viewer {
   setShadows(on) {
     this.options.shadows = on;
     this.sun.castShadow = on;
-    if (this.ground) this.ground.visible = on && this.options.shading !== 'wireframe';
+    if (this.ground) this.ground.visible = on;
     this._shadowsDirty = on;
     this.invalidate();
   }
@@ -270,15 +270,13 @@ export class Viewer {
 
   /**
    * Viewport shading, as in Blender: 'material' (the scene's own), 'matcap'
-   * (one lit-sphere look on everything, `look` picks which) or 'wireframe'.
+   * 'plain' (no material: neutral grey, lit) or 'matcap' (one lit-sphere look
+   * on everything, `look` picks which).
    */
   setShading(mode, look = this.options.matcap) {
     this.options.shading = mode;
     this.options.matcap = look;
     this._applyShading();
-    if (this.ground) this.ground.visible = this.options.shadows && mode !== 'wireframe';
-    // the shadow pass copies `wireframe` from each material: redraw it for the new mode
-    this._shadowsDirty = this.options.shadows;
     this.invalidate();
   }
 
@@ -378,7 +376,7 @@ export class Viewer {
     this.grid.material.uniforms.uSpacing.value = Math.pow(10, Math.floor(Math.log10(Math.max(r / 5, 1e-3))));
     this.grid.material.uniforms.uFade.value = r * 6;
     this.grid.visible = this.options.grid;
-    this.ground.visible = this.options.shadows && this.options.shading !== 'wireframe';
+    this.ground.visible = this.options.shadows;
   }
 
   _placeSun() {

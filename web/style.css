@@ -1334,6 +1334,7 @@ body.resizing-panel { cursor: ew-resize; user-select: none; }
 .shading .tool[aria-checked="true"] { color: var(--accent); background: var(--accent-soft); }
 .shading svg .soft { fill: currentColor; fill-opacity: 0.28; }
 .shading svg .solid { fill: currentColor; fill-opacity: 0.55; stroke: none; }
+.shading svg .dot-hl { fill: currentColor; stroke: none; }
 @media (max-width: 760px) { .shading { display: none; } }
 
 #panel .swatches {

@@ -30,11 +30,11 @@
     <div id="variants" class="variants" hidden></div>
     <div class="tools">
       <div class="shading" id="shading" role="radiogroup" aria-label="Viewport shading">
-        <button type="button" class="tool" role="radio" data-shading="wireframe" title="Wireframe (Z cycles)">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><ellipse cx="12" cy="12" rx="8.5" ry="3.4"/><ellipse cx="12" cy="12" rx="3.4" ry="8.5"/></svg>
+        <button type="button" class="tool" role="radio" data-shading="plain" title="No material (Z cycles)">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" class="soft"/></svg>
         </button>
         <button type="button" class="tool" role="radio" data-shading="matcap" title="Matcap (Z cycles)">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" class="soft"/><path d="M7.4 10.2a5 5 0 0 1 3.6-3.4"/></svg>
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" class="soft"/><path d="M7.4 10.2a5 5 0 0 1 3.6-3.4"/><circle cx="9.6" cy="9" r="1.2" class="dot-hl"/></svg>
         </button>
         <button type="button" class="tool" role="radio" data-shading="material" title="Material (Z cycles)">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path class="solid" d="M12 3.5a8.5 8.5 0 0 1 8.5 8.5H12zM12 12v8.5A8.5 8.5 0 0 1 3.5 12z"/></svg>
@@ -78,8 +78,8 @@
         <h3>Shading</h3>
         <div class="seg" id="shading-seg" role="radiogroup" aria-label="Viewport shading">
           <button type="button" class="seg__btn" data-shading="material" role="radio">Material</button>
+          <button type="button" class="seg__btn" data-shading="plain" role="radio">No material</button>
           <button type="button" class="seg__btn" data-shading="matcap" role="radio">Matcap</button>
-          <button type="button" class="seg__btn" data-shading="wireframe" role="radio">Wireframe</button>
         </div>
         <div class="swatches" id="matcaps" role="radiogroup" aria-label="Matcap"></div>
       </div>
@@ -214,7 +214,7 @@
           <tr><td><kbd>E</kbd> / <kbd>Q</kbd></td><td>Up / down</td></tr>
           <tr><td><kbd>Shift</kbd> / <kbd>Ctrl</kbd></td><td>Faster / slower</td></tr>
           <tr><td><kbd>F</kbd></td><td>Frame selection (or the scene)</td></tr>
-          <tr><td><kbd>Z</kbd></td><td>Shading: material · matcap · wireframe</td></tr>
+          <tr><td><kbd>Z</kbd></td><td>Shading: material · no material · matcap</td></tr>
           <tr><td><kbd>T</kbd> <kbd>I</kbd></td><td>Scene graph · scene info</td></tr>
           <tr><td><kbd>Esc</kbd></td><td>Clear the selection</td></tr>
           <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>Previous / next variant</td></tr>
