@@ -31,7 +31,7 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, UsdUtils
 from . import exr
 from .glb import GlbBuilder
 
-CONVERTER_VERSION = "5"
+CONVERTER_VERSION = "6"
 
 # Level of detail: meshes with at least this many triangles get simplified
 # versions (each ~1/4 of the previous) that the viewer switches to by screen size.
@@ -938,7 +938,8 @@ class _Converter:
         """Follow a MaterialX input upstream.
 
         Returns ("value", v), ("texture", info) or (None, None). Understands
-        image-like nodes (anything with a `file` input, incl. triplanar ones) and
+        image-like nodes (a `file` input, or MaterialX triplanarprojection's
+        filex / filey / filez; Karma's triplanar nodes included) and
         passes through convert / extract / normalmap / transform nodes.
         """
         inp = shader.GetInput(name)
@@ -955,14 +956,22 @@ class _Converter:
         if not node:
             return None, None
         nid = str(node.GetIdAttr().Get() or "")
-        if node.GetInput("file"):
-            kind, f = self._mx_trace(node, "file", depth=depth + 1)
+        # image nodes read `file`; MaterialX's own triplanarprojection reads one
+        # image per axis (filex / filey / filez), which artists usually set alike
+        file_input = next((n for n in ("file", "filex", "filey", "filez") if node.GetInput(n)), None)
+        if file_input:
+            kind, f = self._mx_trace(node, file_input, depth=depth + 1)
             if kind != "value" or not isinstance(f, Sdf.AssetPath):
                 return None, None
+            if file_input == "filex":
+                others = {self._mx_trace(node, n, depth=depth + 1)[1] for n in ("filey", "filez") if node.GetInput(n)}
+                if any(isinstance(o, Sdf.AssetPath) and o.path != f.path for o in others):
+                    self.report.warn(f"{_display(node.GetPath().pathString)}: a different image per axis "
+                                     "is shown with the X image on every axis")
             info = {
                 "path": f.resolvedPath or None,
                 "authored": f.path,
-                "colorSpace": self._asset_colorspace(node, "file"),
+                "colorSpace": self._asset_colorspace(node, file_input),
                 "channel": channel or "rgb",
                 "wrapS": REPEAT,
                 "wrapT": REPEAT,

@@ -512,3 +512,38 @@ def test_variant_overrides(scene_dir):
     assert Usd.Stage.Open(tower).GetDefaultPrim().GetVariantSet("color").GetVariantSelection() == "stone"
     with pytest.raises(Exception):
         convert(tower, variants={"not a path": {"color": "sand"}})
+
+
+def test_materialx_triplanarprojection_node(tmp_path):
+    """MaterialX's own triplanar node reads filex / filey / filez, not `file`."""
+    from PIL import Image
+    from pxr import UsdShade
+
+    Image.new("RGB", (32, 32), (200, 100, 50)).save(tmp_path / "bc.png")
+    path = tmp_path / "tri.usda"
+    stage = Usd.Stage.CreateNew(str(path))
+    cube = UsdGeom.Cube.Define(stage, "/World/Cube")
+    mat = UsdShade.Material.Define(stage, "/World/Mtl")
+    surf = UsdShade.Shader.Define(stage, "/World/Mtl/surface")
+    surf.CreateIdAttr("ND_standard_surface_surfaceshader")
+    tri = UsdShade.Shader.Define(stage, "/World/Mtl/tri")
+    tri.CreateIdAttr("ND_triplanarprojection_color3")
+    for axis in "xyz":
+        tri.CreateInput(f"file{axis}", Sdf.ValueTypeNames.Asset).Set("./bc.png")
+    surf.CreateInput("base_color", Sdf.ValueTypeNames.Color3f).ConnectToSource(tri.ConnectableAPI(), "out")
+    mat.CreateSurfaceOutput("mtlx").ConnectToSource(surf.ConnectableAPI(), "out")
+    UsdShade.MaterialBindingAPI.Apply(cube.GetPrim()).Bind(mat)
+    stage.Save()
+
+    data, info = convert(str(path))
+    gltf, _ = parse_glb(data)
+    m = gltf["materials"][0]
+    assert "baseColorTexture" in m["pbrMetallicRoughness"]
+    # no position input: object space, one tile per unit
+    assert m["extras"]["usdvTriplanar"] == {"scale": 1.0, "space": "object", "flipNormalY": False}
+    assert info["warnings"] == []
+
+    tri.GetInput("filez").Set("./other.png")
+    stage.Save()
+    _, info = convert(str(path))
+    assert any("different image per axis" in w for w in info["warnings"])
