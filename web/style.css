@@ -608,7 +608,7 @@ body.drag-over .dropzone { border-color: var(--accent); background: var(--accent
 
   position: fixed;
   top: 60px;
-  left: 12px;
+  right: 12px;
   bottom: 12px;
   width: 360px;
   display: flex;
@@ -629,7 +629,10 @@ body.drag-over .dropzone { border-color: var(--accent); background: var(--accent
   overflow: hidden;
   z-index: 2;
 }
-body.graph-open #hud { left: 384px; }
+/* on the right with the inspector: the scene graph sits just inside it */
+@media (min-width: 761px) {
+  body:not(.no-inspector) #graph { right: calc(12px + 300px + 8px); }
+}
 body.graph-open #nav-hint { display: none; }
 
 #graph button {
