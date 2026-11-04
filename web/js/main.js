@@ -1,12 +1,15 @@
 import { Viewer } from './viewer.js';
 import {
-  convertUpload, filesFromDrop, filesFromInput, getUpload, isDirectGltf, uploadFiles,
+  convertUpload, filesFromDrop, filesFromInput, getHealth, getUpload, isDirectGltf, openPath, uploadFiles,
 } from './upload.js';
 
 const $ = (id) => document.getElementById(id);
 
 const viewer = new Viewer($('viewport'));
-let current = { uploadId: null, root: null };
+// source: 'upload' (files sent to the server) or 'path' (read in place on the server machine)
+let current = { source: null, uploadId: null, path: null, root: null };
+let purpose = 'render';
+let localPaths = false;
 let busy = false;
 
 // -- status ------------------------------------------------------------------
@@ -51,7 +54,11 @@ function showReport(report) {
   if (report) {
     rows.push(['Root', report.root]);
     rows.push(['Layers', fmtInt(report.layers.length)]);
-    rows.push(['Mesh prims', fmtInt(s.meshPrims)]);
+    rows.push(['Geometry', report.purpose === 'proxy' ? 'proxy purpose' : 'render purpose']);
+    if (s.pointInstancers) {
+      rows.push(['Point instancers', fmtInt(s.pointInstancers)]);
+    }
+    rows.push(['Mesh instances', fmtInt(s.meshPrims)]);
     rows.push(['Unique meshes', fmtInt(s.uniqueMeshes)]);
     rows.push(['Triangles', fmtInt(s.triangles)]);
     rows.push(['Materials', fmtInt(s.materials)]);
@@ -79,6 +86,23 @@ function showReport(report) {
   const warnings = report ? [...report.compositionErrors, ...report.warnings] : [];
   fillList('warnings-details', 'warnings-count', 'warnings-list', warnings);
   fillList('layers-details', 'layers-count', 'layers-list', report?.layers);
+  showMissingNotice(report);
+}
+
+function showMissingNotice(report) {
+  const missing = report?.unresolved?.length || 0;
+  $('missing-section').hidden = missing === 0;
+  if (!missing) return;
+  const n = `${missing} file${missing === 1 ? '' : 's'}`;
+  if (report.source === 'upload') {
+    $('missing-text').textContent = `${n} referenced by the scene ${missing === 1 ? 'is' : 'are'} outside what was `
+      + 'dropped. The browser can only send what you give it, so drop the folder that contains everything '
+      + '(e.g. the project root)'
+      + (localPaths ? ", or paste the root layer's path above to read it in place." : '.');
+  } else {
+    $('missing-text').textContent = `${n} referenced by the scene could not be found on disk. `
+      + 'See Missing assets below.';
+  }
 }
 
 function showRoots(summary) {
@@ -96,18 +120,55 @@ function showRoots(summary) {
 
 // -- loading -----------------------------------------------------------------
 
-async function convertAndLoad(uploadId, root) {
-  setStatus(`Converting ${root} …`, { progress: -1 });
-  const report = await convertUpload(uploadId, root);
-  current = { uploadId, root: report.root };
-  $('root-select').value = report.root;
-  history.replaceState(null, '', `#upload=${uploadId}&root=${encodeURIComponent(report.root)}`);
+function updateHash() {
+  const params = new URLSearchParams();
+  if (current.source === 'upload') params.set('upload', current.uploadId);
+  else if (current.source === 'path') params.set('path', current.path);
+  else {
+    history.replaceState(null, '', location.pathname);
+    return;
+  }
+  if (current.root) params.set('root', current.root);
+  if (purpose !== 'render') params.set('purpose', purpose);
+  history.replaceState(null, '', `#${params}`);
+}
 
+async function loadReport(report) {
+  updateHash();
   setStatus(`Loading ${fmtBytes(report.glbBytes)} …`, { progress: 0 });
   await viewer.loadGlb(report.glbUrl, (p) => setStatus(`Loading ${fmtBytes(report.glbBytes)} …`, { progress: p }));
   showReport(report);
   setStatus('');
   updateClickHint();
+}
+
+async function convertAndLoad(uploadId, root) {
+  setStatus(`Converting ${root} …`, { progress: -1 });
+  const report = await convertUpload(uploadId, root, purpose);
+  current = { source: 'upload', uploadId, path: null, root: report.root };
+  $('root-select').value = report.root;
+  await loadReport(report);
+}
+
+async function openPathAndLoad(path, root = null) {
+  setStatus(`Converting ${root || path} …`, { progress: -1 });
+  const report = await openPath(path, root, purpose);
+  current = { source: 'path', uploadId: null, path, root: report.folder ? report.root : null };
+  if (report.folder) {
+    showRoots({ usdFiles: report.rootCandidates, rootCandidates: report.rootCandidates });
+    $('root-select').value = report.root;
+  } else {
+    $('root-section').hidden = true;
+  }
+  $('path-input').value = path;
+  await loadReport(report);
+}
+
+/** Convert the current scene again (e.g. after switching purpose). */
+function reloadCurrent() {
+  if (current.source === 'upload') return run(() => convertAndLoad(current.uploadId, current.root));
+  if (current.source === 'path') return run(() => openPathAndLoad(current.path, current.root));
+  return undefined;
 }
 
 async function run(task) {
@@ -134,9 +195,9 @@ function openFiles(files) {
       } finally {
         URL.revokeObjectURL(url);
       }
-      current = { uploadId: null, root: null };
+      current = { source: null, uploadId: null, path: null, root: null };
       $('root-section').hidden = true;
-      history.replaceState(null, '', location.pathname);
+      updateHash();
       showReport(null);
       setStatus('');
       updateClickHint();
@@ -154,13 +215,19 @@ function openFiles(files) {
 
 async function restoreFromHash() {
   const params = new URLSearchParams(location.hash.slice(1));
+  purpose = params.get('purpose') === 'proxy' ? 'proxy' : 'render';
+  $('opt-proxy').checked = purpose === 'proxy';
   const uploadId = params.get('upload');
-  if (!uploadId) return;
-  await run(async () => {
-    const summary = await getUpload(uploadId);
-    showRoots(summary);
-    await convertAndLoad(uploadId, params.get('root') || summary.root);
-  });
+  const path = params.get('path');
+  if (path) {
+    await run(() => openPathAndLoad(path, params.get('root')));
+  } else if (uploadId) {
+    await run(async () => {
+      const summary = await getUpload(uploadId);
+      showRoots(summary);
+      await convertAndLoad(uploadId, params.get('root') || summary.root);
+    });
+  }
 }
 
 // -- UI wiring -----------------------------------------------------------------
@@ -175,7 +242,24 @@ for (const id of ['folder-input', 'files-input']) {
 }
 
 $('root-select').addEventListener('change', (e) => {
-  if (current.uploadId) run(() => convertAndLoad(current.uploadId, e.target.value));
+  if (current.source === 'upload') run(() => convertAndLoad(current.uploadId, e.target.value));
+  else if (current.source === 'path') run(() => openPathAndLoad(current.path, e.target.value));
+});
+
+$('path-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const path = $('path-input').value.trim().replace(/^"(.*)"$/, '$1');
+  if (path) run(() => openPathAndLoad(path));
+  $('path-input').blur();
+});
+
+$('opt-proxy').addEventListener('change', (e) => {
+  if (busy) {
+    e.target.checked = purpose === 'proxy';
+    return;
+  }
+  purpose = e.target.checked ? 'proxy' : 'render';
+  if (!reloadCurrent()) updateHash();
 });
 
 $('toggle-panel').addEventListener('click', togglePanel);
@@ -195,6 +279,7 @@ window.addEventListener('keydown', (e) => {
     case 'KeyG': $('opt-grid').click(); break;
     case 'KeyB': $('opt-double').click(); break;
     case 'KeyI': togglePanel(); break;
+    case 'KeyP': $('opt-proxy').click(); break;
     default: return;
   }
   // keep focus off the toggled checkbox so Space doesn't re-toggle it
@@ -241,4 +326,10 @@ viewer.onFrame = () => {
 // debugging handle
 window.usdViewer = viewer;
 
-restoreFromHash();
+// a pasted #path=… / #upload=… link (replaceState from this page doesn't fire this)
+window.addEventListener('hashchange', restoreFromHash);
+
+getHealth().then((h) => {
+  localPaths = !!h.localPaths;
+  $('path-section').hidden = !localPaths;
+}).finally(restoreFromHash);

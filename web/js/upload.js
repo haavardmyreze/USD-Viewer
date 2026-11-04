@@ -87,15 +87,29 @@ export async function getUpload(uploadId) {
   return body;
 }
 
-export async function convertUpload(uploadId, root) {
-  const res = await fetch(`/api/uploads/${encodeURIComponent(uploadId)}/convert`, {
+async function postJson(url, payload) {
+  const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ root }),
+    body: JSON.stringify(payload),
   });
   const body = await res.json().catch(() => null);
   if (!res.ok) throw new Error(errorText(body, res.status));
   return body;
+}
+
+export function convertUpload(uploadId, root, purpose = 'render') {
+  return postJson(`/api/uploads/${encodeURIComponent(uploadId)}/convert`, { root, purpose });
+}
+
+/** Convert a file or folder straight from the server machine's disk. */
+export function openPath(path, root = null, purpose = 'render') {
+  return postJson('/api/open', { path, root, purpose });
+}
+
+export async function getHealth() {
+  const res = await fetch('/api/health');
+  return res.ok ? res.json() : { ok: false };
 }
 
 function errorText(body, status) {

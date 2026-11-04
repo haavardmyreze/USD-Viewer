@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from pxr import Sdf, Usd, UsdGeom
+from pxr import Gf, Sdf, Usd, UsdGeom
 
 from server.uploads import find_root_candidates
 from server.usd_to_glb import _triangulate, convert, dependency_report
@@ -134,3 +134,150 @@ def test_usdz_with_texture(tmp_path, scene_dir):
     assert UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(str(scene_dir / "assets/crate/crate.usda")), str(usdz))
     gltf, _ = parse_glb(convert(str(usdz))[0])
     assert len(gltf["images"]) == 1
+
+
+def _instancer_stage(path):
+    """Two PointInstancers: one with an inactive instance and a prototype that
+    itself contains a nested PointInstancer (2 x 3 = 6 boxes)."""
+    stage = Usd.Stage.CreateNew(str(path))
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
+    UsdGeom.Xform.Define(stage, "/World")
+
+    pi = UsdGeom.PointInstancer.Define(stage, "/World/Scatter")
+    UsdGeom.XformCommonAPI(pi).SetTranslate((0, 10, 0))
+    protos = UsdGeom.Scope.Define(stage, "/World/Scatter/Prototypes")
+    box = UsdGeom.Cube.Define(stage, "/World/Scatter/Prototypes/Box")
+    UsdGeom.XformCommonAPI(box).SetTranslate((0, 1, 0))  # prototype root xform applies
+    proxy = UsdGeom.Cube.Define(stage, "/World/Scatter/Prototypes/Box/proxyGeo")
+    proxy.CreatePurposeAttr(UsdGeom.Tokens.proxy)
+    pi.CreatePrototypesRel().SetTargets([box.GetPath()])
+    pi.CreateProtoIndicesAttr([0, 0, 0])
+    pi.CreatePositionsAttr([(1, 0, 0), (2, 0, 0), (3, 0, 0)])
+    pi.CreateOrientationsAttr([Gf.Quath(1, 0, 0, 0)] * 3)
+    pi.CreateScalesAttr([(2, 2, 2)] * 3)
+    pi.CreateIdsAttr([10, 11, 12])
+    pi.DeactivateId(11)
+
+    outer = UsdGeom.PointInstancer.Define(stage, "/World/Rows")
+    row = UsdGeom.Xform.Define(stage, "/World/Rows/Prototypes/Row")
+    inner = UsdGeom.PointInstancer.Define(stage, "/World/Rows/Prototypes/Row/Inner")
+    leaf = UsdGeom.Sphere.Define(stage, "/World/Rows/Prototypes/Row/Inner/Prototypes/Ball")
+    inner.CreatePrototypesRel().SetTargets([leaf.GetPath()])
+    inner.CreateProtoIndicesAttr([0, 0, 0])
+    inner.CreatePositionsAttr([(0, 0, 0), (0, 0, 5), (0, 0, 10)])
+    outer.CreatePrototypesRel().SetTargets([row.GetPath()])
+    outer.CreateProtoIndicesAttr([0, 0])
+    outer.CreatePositionsAttr([(-20, 0, 0), (-40, 0, 0)])
+    stage.Save()
+    return path
+
+
+def _instanced_nodes(gltf, binary):
+    out = {}
+    for n in gltf["nodes"]:
+        ext = n.get("extensions", {}).get("EXT_mesh_gpu_instancing")
+        if ext:
+            out[n["name"]] = {k: accessor(gltf, binary, v) for k, v in ext["attributes"].items()}
+    return out
+
+
+def test_point_instancer(tmp_path):
+    data, info = convert(str(_instancer_stage(tmp_path / "pi.usda")))
+    gltf, binary = parse_glb(data)
+    assert "EXT_mesh_gpu_instancing" in gltf["extensionsUsed"]
+    nodes = _instanced_nodes(gltf, binary)
+
+    boxes = nodes["/World/Scatter/Box"]
+    # instance 11 is inactive; proto root translate (0,1,0) is scaled by the instance scale 2
+    assert boxes["TRANSLATION"].tolist() == [[1, 12, 0], [3, 12, 0]]
+    assert np.allclose(boxes["SCALE"], 2)
+    assert np.allclose(boxes["ROTATION"], [0, 0, 0, 1])
+
+    balls = nodes["/World/Rows/Row"]
+    assert len(balls["TRANSLATION"]) == 6
+    assert sorted(map(tuple, balls["TRANSLATION"].tolist())) == sorted(
+        (x, 0, z) for x in (-20, -40) for z in (0, 5, 10))
+
+    assert info["stats"]["pointInstancers"] == 3  # outer + nested inner (once per prototype) + scatter
+    assert info["stats"]["meshPrims"] == 8
+    assert info["warnings"] == []
+
+
+def test_purpose_selection(tmp_path):
+    path = _instancer_stage(tmp_path / "pi.usda")
+    render_info = convert(str(path))[1]
+    proxy_info = convert(str(path), "proxy")[1]
+    # the proxy cube under each box is only drawn in proxy mode
+    assert proxy_info["stats"]["meshPrims"] == render_info["stats"]["meshPrims"] + 2
+    assert proxy_info["purpose"] == "proxy"
+
+
+def test_instance_decomposition_rejects_mirroring():
+    from server.usd_to_glb import _decompose_trs
+    mirror = np.eye(4)[None].copy()
+    mirror[0, 0, 0] = -1
+    assert _decompose_trs(mirror) is None
+    rot = np.eye(4)[None].copy()
+    rot[0, :3, :3] = [[0, 0, -1], [0, 1, 0], [1, 0, 0]]  # row-vector 90 deg about Y
+    t, r, s = _decompose_trs(rot)
+    assert np.allclose(np.abs(r[0]), [0, np.sqrt(0.5), 0, np.sqrt(0.5)], atol=1e-6)
+    assert np.allclose(s, 1)
+
+
+def test_materialx_triplanar_material(tmp_path):
+    from PIL import Image
+    from pxr import UsdShade
+
+    Image.new("RGB", (3000, 1500), (200, 100, 50)).save(tmp_path / "bc.png")
+    Image.new("RGB", (64, 64), (255, 128, 0)).save(tmp_path / "orm.png")
+    path = tmp_path / "mtlx.usda"
+    stage = Usd.Stage.CreateNew(str(path))
+    UsdGeom.SetStageMetersPerUnit(stage, 0.01)
+    cube = UsdGeom.Cube.Define(stage, "/World/Cube")
+    mat = UsdShade.Material.Define(stage, "/World/Mtl")
+
+    def shader(name, sid):
+        s = UsdShade.Shader.Define(stage, f"/World/Mtl/{name}")
+        s.CreateIdAttr(sid)
+        return s
+
+    surf = shader("surface", "ND_standard_surface_surfaceshader")
+    pos = shader("pos", "ND_position_vector3")
+    pos.CreateInput("space", Sdf.ValueTypeNames.String).Set("world")
+    mul = shader("mul", "ND_multiply_vector3FA")
+    mul.CreateInput("in1", Sdf.ValueTypeNames.Vector3f).ConnectToSource(pos.ConnectableAPI(), "out")
+    mul.CreateInput("in2", Sdf.ValueTypeNames.Float).Set(0.5)
+    bc = shader("bc", "kma_hextiled_triplanar_color")
+    bc.CreateInput("file", Sdf.ValueTypeNames.Asset).Set("./bc.png")
+    bc.CreateInput("position", Sdf.ValueTypeNames.Vector3f).ConnectToSource(mul.ConnectableAPI(), "out")
+    conv = shader("conv", "ND_convert_color4_color3")
+    conv.CreateInput("in", Sdf.ValueTypeNames.Color4f).ConnectToSource(bc.ConnectableAPI(), "out")
+    orm = shader("orm", "ND_image_color4")
+    orm.CreateInput("file", Sdf.ValueTypeNames.Asset).Set("./orm.png")
+    ext = shader("ext", "ND_extract_color4")
+    ext.CreateInput("in", Sdf.ValueTypeNames.Color4f).ConnectToSource(orm.ConnectableAPI(), "out")
+    ext.CreateInput("index", Sdf.ValueTypeNames.Int).Set(1)
+    surf.CreateInput("base_color", Sdf.ValueTypeNames.Color3f).ConnectToSource(conv.ConnectableAPI(), "out")
+    surf.CreateInput("specular_roughness", Sdf.ValueTypeNames.Float).ConnectToSource(ext.ConnectableAPI(), "out")
+    mat.CreateSurfaceOutput("mtlx").ConnectToSource(surf.ConnectableAPI(), "out")
+    # a flat auto-generated preview shader must not win over MaterialX
+    preview = shader("preview", "UsdPreviewSurface")
+    preview.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set((0.8, 0.8, 0.8))
+    mat.CreateSurfaceOutput().ConnectToSource(preview.ConnectableAPI(), "surface")
+    UsdShade.MaterialBindingAPI.Apply(cube.GetPrim()).Bind(mat)
+    stage.Save()
+
+    data, info = convert(str(path))
+    gltf, binary = parse_glb(data)
+    m = gltf["materials"][0]
+    pbr = m["pbrMetallicRoughness"]
+    assert "baseColorTexture" in pbr and "metallicRoughnessTexture" in pbr
+    assert pbr["roughnessFactor"] == 1.0 and pbr["metallicFactor"] == 0.0
+    tri = m["extras"]["usdvTriplanar"]
+    assert tri["space"] == "world"
+    assert tri["scale"] == pytest.approx(50.0)  # 0.5 per cm -> 50 per metre
+    # the oversized texture was downscaled and re-encoded; the ORM map is used as-is
+    images = {i["name"]: i for i in gltf["images"]}
+    assert images["bc.png"]["mimeType"] == "image/jpeg"
+    assert images["orm.png"]["mimeType"] == "image/png"
+    assert any("hex-tiled" in w for w in info["warnings"])

@@ -50,11 +50,15 @@ class GlbBuilder:
         self.gltf["bufferViews"].append(view)
         return len(self.gltf["bufferViews"]) - 1
 
-    def add_attribute(self, values: np.ndarray) -> int:
-        """Add a float vertex attribute, shape (N,) or (N, width)."""
+    def add_attribute(self, values: np.ndarray, target: int | None = ARRAY_BUFFER) -> int:
+        """Add a float attribute, shape (N,) or (N, width).
+
+        Vertex attributes use target=ARRAY_BUFFER; per-instance data
+        (EXT_mesh_gpu_instancing) must not set a target.
+        """
         arr = np.ascontiguousarray(values, dtype=np.float32)
         width = 1 if arr.ndim == 1 else arr.shape[1]
-        view = self._add_view(arr.tobytes(), ARRAY_BUFFER)
+        view = self._add_view(arr.tobytes(), target)
         acc = {
             "bufferView": view,
             "componentType": FLOAT,
@@ -101,7 +105,11 @@ class GlbBuilder:
         return len(self.gltf["samplers"]) - 1
 
     def add_texture(self, image: int, sampler: int) -> int:
-        self.gltf["textures"].append({"source": image, "sampler": sampler})
+        texture = {"source": image, "sampler": sampler}
+        for i, existing in enumerate(self.gltf["textures"]):
+            if existing == texture:
+                return i
+        self.gltf["textures"].append(texture)
         return len(self.gltf["textures"]) - 1
 
     def add_material(self, material: dict) -> int:

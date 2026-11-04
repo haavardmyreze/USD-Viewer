@@ -35,6 +35,22 @@
                accept=".usd,.usda,.usdc,.usdz,.zip,.glb,.gltf">
       </section>
 
+      <section id="path-section" hidden>
+        <label for="path-input">Open a path on this machine</label>
+        <form id="path-form" class="path-row">
+          <input id="path-input" type="text" spellcheck="false" autocomplete="off"
+                 placeholder="V:\project\sets\layout.usda">
+          <button type="submit">Open</button>
+        </form>
+        <p class="hint small">Reads files in place, so references like <code>../../assets</code> resolve
+          without uploading anything. A folder opens its root layer.</p>
+      </section>
+
+      <section id="missing-section" class="notice" hidden>
+        <strong>Some referenced files weren't included.</strong>
+        <span id="missing-text"></span>
+      </section>
+
       <section id="status-section" hidden>
         <div id="status"></div>
         <progress id="progress" max="1" value="0" hidden></progress>
@@ -64,6 +80,8 @@
       <section class="toggles">
         <label><input type="checkbox" id="opt-grid"> Grid <kbd>G</kbd></label>
         <label><input type="checkbox" id="opt-double"> Double-sided <kbd>B</kbd></label>
+        <label title="Show proxy-purpose geometry instead of render-purpose geometry (lighter, like a DCC viewport)">
+          <input type="checkbox" id="opt-proxy"> Proxy <kbd>P</kbd></label>
       </section>
 
       <section class="help">

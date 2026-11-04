@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { FlyControls } from './flyControls.js';
+import { applyTriplanarToScene } from './triplanar.js';
 
 export class Viewer {
   constructor(canvas) {
@@ -46,6 +47,7 @@ export class Viewer {
     const gltf = await this.loader.loadAsync(url, (e) => {
       if (e.lengthComputable) onProgress?.(e.loaded / e.total);
     });
+    applyTriplanarToScene(gltf.scene);
     this.setModel(gltf.scene);
     return gltf;
   }

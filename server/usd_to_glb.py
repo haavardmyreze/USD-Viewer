@@ -11,6 +11,8 @@ Supported in this first pass:
   * normals / st / displayColor primvars at any interpolation (indexed or not)
   * UsdPreviewSurface materials incl. textures, GeomSubset material bindings
   * native instancing (shared glTF meshes)
+  * PointInstancer (incl. nested), written as EXT_mesh_gpu_instancing
+  * render / proxy purpose selection
   * upAxis + metersPerUnit (output is Y-up, metres)
 """
 
@@ -27,7 +29,12 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, UsdUtils
 
 from .glb import GlbBuilder
 
-CONVERTER_VERSION = "1"
+CONVERTER_VERSION = "2"
+
+# textures larger than this (longest side, px) are downscaled; 0 disables
+MAX_TEXTURE_SIZE = int(os.environ.get("USDV_MAX_TEXTURE_SIZE", "2048"))
+
+PURPOSES = ("render", "proxy")
 
 # glTF sampler wrap modes
 REPEAT, CLAMP, MIRROR = 10497, 33071, 33648
@@ -51,6 +58,12 @@ _KNOWN_NON_GEOM = {
     "RenderProduct", "RenderVar", "PhysicsScene", "Material", "Shader",
     "NodeGraph", "GeomSubset", "CollectionAPI",
 }
+
+
+def _display(path: str) -> str:
+    """Prim path for messages: hide USD's internal instancing prototype roots."""
+    import re
+    return re.sub(r"^/__Prototype_\d+", "<instanced>", path)
 
 
 class ConversionError(Exception):
@@ -118,6 +131,47 @@ def _smooth_normals(points, tri_points):
     for i in range(3):
         np.add.at(acc, tri_points[:, i], fn)
     return _normalize(acc)
+
+
+def _quat_from_rotation(r):
+    """(N, 3, 3) column-vector rotation matrices -> (N, 4) quaternions (x, y, z, w)."""
+    m00, m01, m02 = r[:, 0, 0], r[:, 0, 1], r[:, 0, 2]
+    m10, m11, m12 = r[:, 1, 0], r[:, 1, 1], r[:, 1, 2]
+    m20, m21, m22 = r[:, 2, 0], r[:, 2, 1], r[:, 2, 2]
+    tr = m00 + m11 + m22
+    q = np.zeros((len(r), 4))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        c0 = tr > 0
+        c1 = ~c0 & (m00 > m11) & (m00 > m22)
+        c2 = ~c0 & ~c1 & (m11 > m22)
+        c3 = ~c0 & ~c1 & ~c2
+        s = np.sqrt(np.maximum(tr + 1.0, 0)) * 2
+        q[c0] = np.stack([(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, 0.25 * s], 1)[c0]
+        s = np.sqrt(np.maximum(1.0 + m00 - m11 - m22, 0)) * 2
+        q[c1] = np.stack([0.25 * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s], 1)[c1]
+        s = np.sqrt(np.maximum(1.0 + m11 - m00 - m22, 0)) * 2
+        q[c2] = np.stack([(m01 + m10) / s, 0.25 * s, (m12 + m21) / s, (m02 - m20) / s], 1)[c2]
+        s = np.sqrt(np.maximum(1.0 + m22 - m00 - m11, 0)) * 2
+        q[c3] = np.stack([(m02 + m20) / s, (m12 + m21) / s, 0.25 * s, (m10 - m01) / s], 1)[c3]
+    return _normalize(q)
+
+
+def _decompose_trs(mats):
+    """Row-vector USD matrices (N, 4, 4) -> glTF (T, R, S) arrays, or None if any
+    matrix has shear, projection or a negative determinant (not expressible as
+    EXT_mesh_gpu_instancing TRS without rendering inside out)."""
+    a = mats[:, :3, :3]
+    if not np.allclose(mats[:, :3, 3], 0, atol=1e-9) or not np.allclose(mats[:, 3, 3], 1, atol=1e-9):
+        return None
+    if (np.linalg.det(a) <= 0).any():
+        return None
+    scale = np.linalg.norm(a, axis=2)  # row i of A is the transformed basis vector i
+    if (scale < 1e-12).any():
+        return None
+    rot = (a / scale[:, :, None]).transpose(0, 2, 1)  # column-vector rotation
+    if not np.allclose(rot.transpose(0, 2, 1) @ rot, np.eye(3), atol=1e-4):
+        return None
+    return mats[:, 3, :3].copy(), _quat_from_rotation(rot), scale
 
 
 def _normalize(v):
@@ -237,7 +291,7 @@ def _gen_plane(width, length):
 
 
 class _Converter:
-    def __init__(self, stage: Usd.Stage) -> None:
+    def __init__(self, stage: Usd.Stage, purpose: str = "render") -> None:
         self.stage = stage
         self.time = Usd.TimeCode.EarliestTime()
         self.report = _Report()
@@ -246,18 +300,27 @@ class _Converter:
         self.material_index: dict = {}
         self.image_index: dict = {}
         self.mesh_cache: dict = {}
+        self.proto_cache: dict = {}
         self.stats = Counter()
+        self.purpose = purpose if purpose in PURPOSES else "render"
+        # "render": what a renderer sees; "proxy": what a viewport shows by default
+        hidden = {UsdGeom.Tokens.guide}
+        hidden.add(UsdGeom.Tokens.proxy if self.purpose == "render" else UsdGeom.Tokens.render)
+        self.hidden_purposes = hidden
+        self.predicate = Usd.TraverseInstanceProxies(Usd.PrimDefaultPredicate)
+        self._active_protos: set[str] = set()
 
     # -- traversal ---------------------------------------------------------
 
-    def run(self) -> tuple[bytes, dict]:
-        stage = self.stage
-        up = UsdGeom.GetStageUpAxis(stage)
-        mpu = UsdGeom.GetStageMetersPerUnit(stage)
+    def _collect(self, start, rel=None):
+        """Renderable items under `start` (inclusive).
 
-        children: list[int] = []
-        predicate = Usd.TraverseInstanceProxies(Usd.PrimDefaultPredicate)
-        it = iter(Usd.PrimRange(stage.GetPseudoRoot(), predicate))
+        Returns a list of (name, mesh_index, matrices, n_tris), where matrices is
+        an (N, 4, 4) array of row-vector USD matrices: world space, or, when `rel`
+        is given, world space multiplied by `rel` (used for prototype space).
+        """
+        out = []
+        it = iter(Usd.PrimRange(start, self.predicate))
         for prim in it:
             if prim.IsPseudoRoot():
                 continue
@@ -267,25 +330,140 @@ class _Converter:
                 continue
             img = UsdGeom.Imageable(prim)
             if img:
-                if img.ComputeVisibility(self.time) == UsdGeom.Tokens.invisible:
+                # visibility is checked per prim as we descend, so it also works inside
+                # prototypes whose ancestors (e.g. a hidden Prototypes scope) are invisible
+                if img.GetVisibilityAttr().Get(self.time) == UsdGeom.Tokens.invisible:
                     it.PruneChildren()
                     continue
-                purpose = img.ComputePurpose()
-                if purpose in (UsdGeom.Tokens.guide, UsdGeom.Tokens.proxy):
+                if img.ComputePurpose() in self.hidden_purposes:
                     it.PruneChildren()
                     continue
             if type_name == "PointInstancer":
-                self.report.skipped_types[type_name] += 1
+                out.extend(self._collect_instancer(prim, rel))
                 it.PruneChildren()
                 continue
             if type_name in _GPRIM_TYPES:
-                node = self._convert_gprim(prim, type_name)
-                if node is not None:
-                    children.append(node)
+                result = self._gprim_mesh(prim, type_name)
+                if result is not None:
+                    mesh_index, n_tris = result
+                    m = np.array(self.xf_cache.GetLocalToWorldTransform(prim), dtype=np.float64)
+                    if rel is not None:
+                        m = m @ rel
+                    out.append((prim.GetPath().pathString, mesh_index, m[None], n_tris))
             elif type_name == "Camera":
                 self.stats["cameras"] += 1
             elif type_name not in _KNOWN_NON_GEOM and prim.IsA(UsdGeom.Gprim):
                 self.report.skipped_types[type_name] += 1
+        return out
+
+    def _collect_instancer(self, prim, rel):
+        t = self.time
+        path = prim.GetPath().pathString
+        pi = UsdGeom.PointInstancer(prim)
+        protos = pi.GetPrototypesRel().GetForwardedTargets()
+        proto_idx = np.array(pi.GetProtoIndicesAttr().Get(t) or [], dtype=np.int64)
+        if not protos or len(proto_idx) == 0:
+            return []
+        xforms = pi.ComputeInstanceTransformsAtTime(
+            t, t, UsdGeom.PointInstancer.ExcludeProtoXform, UsdGeom.PointInstancer.IgnoreMask)
+        if xforms is None or len(xforms) != len(proto_idx):
+            self.report.warn(f"{path}: PointInstancer arrays are inconsistent; skipped")
+            return []
+        inst = np.array(xforms, dtype=np.float64).reshape(-1, 4, 4)
+        mask = pi.ComputeMaskAtTime(t)
+        if mask is not None and len(mask) == len(proto_idx):
+            keep = np.array(mask, dtype=bool)
+            inst, proto_idx = inst[keep], proto_idx[keep]
+        if ((proto_idx < 0) | (proto_idx >= len(protos))).any():
+            self.report.warn(f"{path}: protoIndices out of range ignored")
+
+        world = np.array(self.xf_cache.GetLocalToWorldTransform(prim), dtype=np.float64)
+        if rel is not None:
+            world = world @ rel
+        self.stats["instancers"] += 1
+
+        out = []
+        for p, proto_path in enumerate(protos):
+            sel = np.nonzero(proto_idx == p)[0]
+            if len(sel) == 0:
+                continue
+            proto = self.stage.GetPrimAtPath(proto_path)
+            if not proto:
+                self.report.warn(f"{path}: prototype {proto_path} not found")
+                continue
+            items = self._prototype_items(proto)
+            base = inst[sel] @ world  # (k, 4, 4): instance -> PointInstancer -> world
+            label = f"{path}/{proto_path.name}"
+            for name, mesh_index, mats, n_tris in items:
+                combined = (mats[:, None] @ base[None]).reshape(-1, 4, 4)
+                out.append((label, mesh_index, combined, n_tris))
+        return out
+
+    def _prototype_items(self, proto):
+        """Items of a prototype subtree, relative to the prototype's parent.
+
+        Per the PointInstancer spec the prototype root's own transform applies,
+        but none of its ancestors' do.
+        """
+        key = (proto.GetPrimInPrototype().GetPath() if proto.IsInstanceProxy() else proto.GetPath()).pathString
+        cached = self.proto_cache.get(key)
+        if cached is not None:
+            return cached
+        if key in self._active_protos:
+            self.report.warn(f"Prototype {key} instances itself; recursion stopped")
+            return []
+        self._active_protos.add(key)
+        try:
+            rel = np.linalg.inv(np.array(self.xf_cache.GetParentToWorldTransform(proto), dtype=np.float64))
+            items = self._collect(proto, rel)
+        finally:
+            self._active_protos.discard(key)
+        self.proto_cache[key] = items
+        return items
+
+    def _emit(self, item) -> list[int]:
+        """Write glTF nodes for one collected item."""
+        name, mesh_index, mats, n_tris = item
+        n = len(mats)
+        self.stats["mesh_prims"] += n
+        self.stats["triangles"] += n * n_tris
+        if n == 1:
+            node = {"name": name, "mesh": mesh_index}
+            m = mats[0]
+            if not np.allclose(m, np.eye(4)):
+                node["matrix"] = [float(x) for x in m.reshape(-1)]
+            return [self.glb.add_node(node)]
+
+        self.stats["instances"] += n
+        trs = _decompose_trs(mats)
+        if trs is None:
+            # shear or mirroring: fall back to one node per instance
+            nodes = []
+            for i, m in enumerate(mats):
+                nodes.append(self.glb.add_node({
+                    "name": f"{name}[{i}]", "mesh": mesh_index,
+                    "matrix": [float(x) for x in m.reshape(-1)]}))
+            return nodes
+        t, r, s = trs
+        ext = {"attributes": {
+            "TRANSLATION": self.glb.add_attribute(t, target=None),
+            "ROTATION": self.glb.add_attribute(r, target=None),
+            "SCALE": self.glb.add_attribute(s, target=None),
+        }}
+        used = self.glb.gltf.setdefault("extensionsUsed", [])
+        if "EXT_mesh_gpu_instancing" not in used:
+            used.append("EXT_mesh_gpu_instancing")
+        return [self.glb.add_node({"name": name, "mesh": mesh_index,
+                                   "extensions": {"EXT_mesh_gpu_instancing": ext}})]
+
+    def run(self) -> tuple[bytes, dict]:
+        stage = self.stage
+        up = UsdGeom.GetStageUpAxis(stage)
+        mpu = UsdGeom.GetStageMetersPerUnit(stage)
+
+        children: list[int] = []
+        for item in self._collect(stage.GetPseudoRoot()):
+            children.extend(self._emit(item))
 
         s = float(mpu)
         if up == UsdGeom.Tokens.z:
@@ -304,7 +482,10 @@ class _Converter:
             "upAxis": str(up),
             "metersPerUnit": mpu,
             "defaultPrim": stage.GetDefaultPrim().GetPath().pathString if stage.GetDefaultPrim() else None,
+            "purpose": self.purpose,
             "stats": {
+                "pointInstancers": self.stats["instancers"],
+                "instances": self.stats["instances"],
                 "meshPrims": self.stats["mesh_prims"],
                 "uniqueMeshes": len(self.glb.gltf["meshes"]),
                 "triangles": self.stats["triangles"],
@@ -373,7 +554,8 @@ class _Converter:
             return None, None
         return np.array(vals, dtype=np.float64), pv.GetInterpolation()
 
-    def _convert_gprim(self, prim, type_name):
+    def _gprim_mesh(self, prim, type_name):
+        """glTF mesh for a gprim (shared between instances). Returns (mesh_index, n_tris)."""
         topo = self._topology(prim, type_name)
         if topo is None:
             return None
@@ -409,14 +591,7 @@ class _Converter:
             self.mesh_cache[cache_key] = mesh_index
             self.stats["unique_triangles"] += n_tris
             self.mesh_cache[("tris", mesh_index)] = n_tris
-        self.stats["triangles"] += self.mesh_cache[("tris", mesh_index)]
-        self.stats["mesh_prims"] += 1
-
-        node = {"name": path, "mesh": mesh_index}
-        m = self.xf_cache.GetLocalToWorldTransform(prim)
-        if m != Gf.Matrix4d(1.0):
-            node["matrix"] = [float(m[r][c]) for r in range(4) for c in range(4)]
-        return self.glb.add_node(node)
+        return mesh_index, self.mesh_cache[("tris", mesh_index)]
 
     def _build_mesh(self, prim, path, points, counts, indices, holes, smooth, left, face_group, group_keys):
         corners, face_of_tri = _triangulate(counts)
@@ -548,9 +723,184 @@ class _Converter:
                 mat["alphaMode"] = "BLEND"
         if key[-1]:
             mat["doubleSided"] = True
-        idx = self.glb.add_material(mat)
+        # every instanced prototype carries its own copy of a shared material;
+        # identical results collapse into one glTF material
+        import json
+        sig = json.dumps({k: v for k, v in mat.items() if k != "name"}, sort_keys=True)
+        idx = self.material_index.get(("sig", sig))
+        if idx is None:
+            idx = self.glb.add_material(mat)
+            self.material_index[("sig", sig)] = idx
         self.material_index[key] = idx
         return idx
+
+    def _mtlx_surface(self, material):
+        """A MaterialX standard_surface / open_pbr_surface on any render context."""
+        if not material:
+            return None
+        for out in material.GetSurfaceOutputs():
+            sources = out.GetConnectedSources()[0]
+            for src in sources:
+                s = UsdShade.Shader(src.source.GetPrim())
+                sid = str(s.GetIdAttr().Get() or "") if s else ""
+                if sid.startswith(("ND_standard_surface", "ND_open_pbr_surface")):
+                    return s
+        return None
+
+    def _mx_trace(self, shader, name, channel=None, depth=0):
+        """Follow a MaterialX input upstream.
+
+        Returns ("value", v), ("texture", info) or (None, None). Understands
+        image-like nodes (anything with a `file` input, incl. triplanar ones) and
+        passes through convert / extract / normalmap / transform nodes.
+        """
+        inp = shader.GetInput(name)
+        if not inp or depth > 24:
+            return None, None
+        attrs = inp.GetValueProducingAttributes()
+        if not attrs:
+            return None, None
+        attr = attrs[0]
+        if not UsdShade.Output.IsOutput(attr):
+            v = attr.Get(self.time)
+            return ("value", v) if v is not None else (None, None)
+        node = UsdShade.Shader(attr.GetPrim())
+        if not node:
+            return None, None
+        nid = str(node.GetIdAttr().Get() or "")
+        if node.GetInput("file"):
+            kind, f = self._mx_trace(node, "file", depth=depth + 1)
+            if kind != "value" or not isinstance(f, Sdf.AssetPath):
+                return None, None
+            info = {
+                "path": f.resolvedPath or None,
+                "authored": f.path,
+                "channel": channel or "rgb",
+                "wrapS": REPEAT,
+                "wrapT": REPEAT,
+                "scale": (1, 1, 1, 1),
+                "varname": None,
+                "nodeId": nid,
+                "triplanar": None,
+            }
+            if "triplanar" in nid.lower():
+                info["triplanar"] = self._mx_triplanar(node, depth)
+            return "texture", info
+        if "_extract_" in nid:
+            k, idx = self._mx_trace(node, "index", depth=depth + 1)
+            idx = int(idx) if k == "value" else 0
+            return self._mx_trace(node, "in", "rgba"[max(0, min(idx, 3))], depth + 1)
+        if "_constant_" in nid:
+            return self._mx_trace(node, "value", channel, depth + 1)
+        for upstream in ("in", "in1", "input", "fg"):
+            if node.GetInput(upstream):
+                return self._mx_trace(node, upstream, channel, depth + 1)
+        return None, None
+
+    def _mx_triplanar(self, node, depth):
+        """Projection settings of a triplanar texture node: position scale + space."""
+        scale, space = 1.0, "object"
+        pos = node.GetInput("position")
+        attrs = pos.GetValueProducingAttributes() if pos else []
+        if attrs and UsdShade.Output.IsOutput(attrs[0]):
+            n = UsdShade.Shader(attrs[0].GetPrim())
+            # position node, optionally scaled by a multiply node
+            for _ in range(4):
+                nid = str(n.GetIdAttr().Get() or "")
+                if "_position_" in nid:
+                    k, sp = self._mx_trace(n, "space", depth=depth + 1)
+                    space = "world" if k == "value" and str(sp) == "world" else "object"
+                    break
+                if "_multiply_" in nid:
+                    k, v = self._mx_trace(n, "in2", depth=depth + 1)
+                    if k == "value":
+                        try:
+                            scale *= float(v)
+                        except TypeError:
+                            scale *= float(v[0])
+                    a = n.GetInput("in1").GetValueProducingAttributes() if n.GetInput("in1") else []
+                    if not a or not UsdShade.Output.IsOutput(a[0]):
+                        break
+                    n = UsdShade.Shader(a[0].GetPrim())
+                    continue
+                break
+        k, inv = self._mx_trace(node, "invert", depth=depth + 1)
+        return {"scale": scale, "space": space, "invert": bool(inv) if k == "value" else False}
+
+    def _convert_mtlx(self, mat_path, surf, out):
+        pbr = out["pbrMetallicRoughness"]
+        sid = str(surf.GetIdAttr().Get())
+        openpbr = sid.startswith("ND_open_pbr_surface")
+        names = {
+            "base": "base_weight" if openpbr else "base",
+            "base_color": "base_color",
+            "metalness": "base_metalness" if openpbr else "metalness",
+            "roughness": "specular_roughness",
+            "normal": "geometry_normal" if openpbr else "normal",
+            "emission": "emission_luminance" if openpbr else "emission",
+            "emission_color": "emission_color",
+            "opacity": "geometry_opacity" if openpbr else "opacity",
+        }
+
+        def get(key, default):
+            kind, v = self._mx_trace(surf, names[key])
+            if kind == "texture":
+                return default, v
+            return (default if v is None else v), None
+
+        base, _ = get("base", 1.0)
+        color, color_tex = get("base_color", (0.8, 0.8, 0.8))
+        metal, metal_tex = get("metalness", 0.0)
+        rough, rough_tex = get("roughness", 0.2)
+        _, normal_tex = get("normal", None)
+        opacity, _ = get("opacity", 1.0)
+        base = float(base)
+        try:
+            alpha = float(min(opacity)) if hasattr(opacity, "__len__") else float(opacity)
+        except (TypeError, ValueError):
+            alpha = 1.0
+        if color_tex:
+            pbr["baseColorFactor"] = [base, base, base, alpha]
+            tex = self._texture_ref(color_tex, mat_path, "baseColor")
+            if tex is not None:
+                pbr["baseColorTexture"] = tex
+        else:
+            pbr["baseColorFactor"] = [float(color[0]) * base, float(color[1]) * base, float(color[2]) * base, alpha]
+        if alpha < 1.0:
+            out["alphaMode"] = "BLEND"
+        pbr["metallicFactor"] = float(metal)
+        pbr["roughnessFactor"] = float(rough)
+        if metal_tex or rough_tex:
+            tex = self._packed_mr_texture(metal_tex, rough_tex, mat_path)
+            if tex is not None:
+                pbr["metallicRoughnessTexture"] = tex
+                if metal_tex:
+                    pbr["metallicFactor"] = 1.0
+                if rough_tex:
+                    pbr["roughnessFactor"] = 1.0
+        if normal_tex:
+            tex = self._texture_ref(normal_tex, mat_path, "normal")
+            if tex is not None:
+                out["normalTexture"] = tex
+        emission, _ = get("emission", 0.0)
+        ecolor, _ = get("emission_color", (1, 1, 1))
+        if float(emission) > 0:
+            out["emissiveFactor"] = [min(float(c) * float(emission), 1.0) for c in ecolor[:3]]
+
+        # triplanar projection is not expressible in glTF: the viewer reads it from extras
+        tri = next((t["triplanar"] for t in (color_tex, rough_tex, metal_tex, normal_tex)
+                    if t and t.get("triplanar")), None)
+        if tri:
+            mpu = UsdGeom.GetStageMetersPerUnit(self.stage)
+            scale = tri["scale"] / mpu if tri["space"] == "world" else tri["scale"]
+            out["extras"] = {"usdvTriplanar": {
+                "scale": scale, "space": tri["space"],
+                "flipNormalY": bool(normal_tex and normal_tex["triplanar"] and normal_tex["triplanar"]["invert"]),
+            }}
+            ids = sorted({t["nodeId"] for t in (color_tex, rough_tex, metal_tex, normal_tex) if t})
+            if any("hex" in i for i in ids):
+                self.report.warn(f"Material {_display(mat_path)}: hex-tiled triplanar shown as plain triplanar")
+        return out
 
     def _preview_surface(self, material):
         if not material:
@@ -617,13 +967,18 @@ class _Converter:
 
     def _convert_material(self, mat_path):
         material = UsdShade.Material.Get(self.stage, mat_path)
-        surf = self._preview_surface(material)
         out = {"name": mat_path}
         pbr = {"baseColorFactor": [0.7, 0.7, 0.7, 1.0], "metallicFactor": 0.0, "roughnessFactor": 0.5}
         out["pbrMetallicRoughness"] = pbr
+        # MaterialX wins over UsdPreviewSurface: DCCs (e.g. Houdini) often add an
+        # auto-generated preview shader that is only a flat-colour approximation
+        mtlx = self._mtlx_surface(material)
+        if mtlx is not None:
+            return self._convert_mtlx(mat_path, mtlx, out)
+        surf = self._preview_surface(material)
         if surf is None:
-            self.report.warn(f"Material {mat_path} has no UsdPreviewSurface (MDL/MaterialX not supported yet); "
-                             "using grey")
+            self.report.warn(f"Material {_display(mat_path)} has no UsdPreviewSurface or MaterialX standard_surface "
+                             "(MDL not supported); using grey")
             return out
 
         def value(name, default):
@@ -657,7 +1012,7 @@ class _Converter:
                 out["alphaMode"] = "BLEND"
 
         if int(value("useSpecularWorkflow", 0)):
-            self.report.warn(f"Material {mat_path}: specular workflow approximated as metallic/roughness")
+            self.report.warn(f"Material {_display(mat_path)}: specular workflow approximated as metallic/roughness")
 
         # metallic / roughness
         metallic = float(value("metallic", 0.0))
@@ -724,9 +1079,10 @@ class _Converter:
 
         data = self._read_asset(info["path"])
         if data is None:
-            self.report.warn(f"Texture not found: {info['authored']} (material {mat_path})")
+            self.report.warn(f"Texture not found: {info['authored']} (material {_display(mat_path)})")
             return None
         try:
+            Image.MAX_IMAGE_PIXELS = None  # local production textures (8k/16k) are expected
             img = Image.open(io.BytesIO(data))
             img.load()
             return img
@@ -734,10 +1090,26 @@ class _Converter:
             self.report.warn(f"Unsupported texture format: {info['authored']}")
             return None
 
-    def _encode_png(self, img) -> bytes:
+    @staticmethod
+    def _fit(img):
+        if MAX_TEXTURE_SIZE and max(img.size) > MAX_TEXTURE_SIZE:
+            from PIL import Image
+            k = MAX_TEXTURE_SIZE / max(img.size)
+            img = img.resize((max(1, round(img.size[0] * k)), max(1, round(img.size[1] * k))),
+                             Image.Resampling.LANCZOS)
+        return img
+
+    def _encode(self, img) -> tuple[bytes, str]:
+        """Downscale if needed; JPEG for opaque images, PNG when there is alpha."""
+        img = self._fit(img)
         buf = io.BytesIO()
-        img.save(buf, format="PNG", optimize=False)
-        return buf.getvalue()
+        if "A" in img.getbands():
+            img.save(buf, format="PNG", optimize=False)
+            return buf.getvalue(), "image/png"
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        img.save(buf, format="JPEG", quality=92, subsampling=0)
+        return buf.getvalue(), "image/jpeg"
 
     def _image_from_key(self, key, producer):
         idx = self.image_index.get(key)
@@ -757,16 +1129,22 @@ class _Converter:
         def produce():
             data = self._read_asset(info["path"])
             if data is None:
-                self.report.warn(f"Texture not found: {info['authored']} (material {mat_path})")
+                self.report.warn(f"Texture not found: {info['authored']} (material {_display(mat_path)})")
                 return None
-            if data[:8] == b"\x89PNG\r\n\x1a\n":
-                return data, "image/png"
-            if data[:3] == b"\xff\xd8\xff":
-                return data, "image/jpeg"
+            mime = ("image/png" if data[:8] == b"\x89PNG\r\n\x1a\n"
+                    else "image/jpeg" if data[:3] == b"\xff\xd8\xff" else None)
+            if mime:
+                from PIL import Image
+                try:
+                    size = Image.open(io.BytesIO(data)).size
+                except Exception:
+                    size = (0, 0)
+                if not MAX_TEXTURE_SIZE or max(size) <= MAX_TEXTURE_SIZE:
+                    return data, mime
             img = self._load_pil(info, mat_path)
             if img is None:
                 return None
-            return self._encode_png(img.convert("RGBA" if "A" in img.getbands() else "RGB")), "image/png"
+            return self._encode(img.convert("RGBA" if "A" in img.getbands() else "RGB"))
 
         image = self._image_from_key(("file", info["path"]), produce)
         if image is None:
@@ -800,7 +1178,7 @@ class _Converter:
                 return None
             from PIL import Image
             ch = self._channel(img, info["channel"])
-            return self._encode_png(Image.merge("RGB", (ch, ch, ch))), "image/png"
+            return self._encode(Image.merge("RGB", (ch, ch, ch)))
 
         image = self._image_from_key(("chan", info["path"], info["channel"]), produce)
         if image is None:
@@ -821,7 +1199,7 @@ class _Converter:
             rgb = base.convert("RGB") if base is not None else Image.new("RGB", size, (255, 255, 255))
             alpha = self._channel(op, opacity["channel"]).resize(size) if op is not None else Image.new("L", size, 255)
             r, g, b = rgb.split()
-            return self._encode_png(Image.merge("RGBA", (r, g, b, alpha))), "image/png"
+            return self._encode(Image.merge("RGBA", (r, g, b, alpha)))
 
         key = ("base", diffuse and diffuse["path"], opacity and (opacity["path"], opacity["channel"]))
         image = self._image_from_key(key, produce)
@@ -831,6 +1209,11 @@ class _Converter:
         return {"index": self.glb.add_texture(image, self.glb.add_sampler(ref["wrapS"], ref["wrapT"]))}
 
     def _packed_mr_texture(self, metal, rough, mat_path):
+        # already packed glTF-style (roughness in G, metal in B, e.g. an ORM/AORM map)
+        if rough and rough["channel"] == "g" and (
+                metal is None or (metal["path"] == rough["path"] and metal["channel"] == "b")):
+            return self._texture_ref(rough, mat_path, "metallicRoughness")
+
         def produce():
             from PIL import Image
             m = self._load_pil(metal, mat_path) if metal else None
@@ -841,7 +1224,7 @@ class _Converter:
             g = self._channel(r, rough["channel"]).resize(size) if r is not None else Image.new("L", size, 255)
             b = self._channel(m, metal["channel"]).resize(size) if m is not None else Image.new("L", size, 255)
             zero = Image.new("L", size, 255)
-            return self._encode_png(Image.merge("RGB", (zero, g, b))), "image/png"
+            return self._encode(Image.merge("RGB", (zero, g, b)))
 
         key = ("mr", metal and (metal["path"], metal["channel"]), rough and (rough["path"], rough["channel"]))
         image = self._image_from_key(key, produce)
@@ -862,15 +1245,22 @@ def dependency_report(root_path: str) -> dict:
         layers, assets, unresolved = UsdUtils.ComputeAllDependencies(Sdf.AssetPath(root_path))
     except Exception as exc:  # pragma: no cover - defensive
         return {"layers": [], "assets": [], "unresolved": [], "error": str(exc)}
+    def norm(p: str) -> str:  # USD mixes separators on Windows; report forward slashes
+        return p.replace(os.sep, "/") if os.sep != "/" else p
+
     return {
-        "layers": sorted(l.realPath or l.identifier for l in layers),
-        "assets": sorted(str(a) for a in assets),
-        "unresolved": sorted(str(u) for u in unresolved),
+        "layers": sorted(norm(l.realPath or l.identifier) for l in layers),
+        "assets": sorted(norm(str(a)) for a in assets),
+        "unresolved": sorted(norm(str(u)) for u in unresolved),
     }
 
 
-def convert(root_path: str) -> tuple[bytes, dict]:
-    """Open root_path as a USD stage and return (glb_bytes, report)."""
+def convert(root_path: str, purpose: str = "render") -> tuple[bytes, dict]:
+    """Open root_path as a USD stage and return (glb_bytes, report).
+
+    purpose: "render" shows render + default geometry (what a renderer sees),
+    "proxy" shows proxy + default geometry (lightweight viewport stand-ins).
+    """
     if not os.path.isfile(root_path):
         raise ConversionError(f"Root layer not found: {root_path}")
     try:
@@ -886,7 +1276,7 @@ def convert(root_path: str) -> tuple[bytes, dict]:
     except Exception:
         pass
 
-    glb_bytes, info = _Converter(stage).run()
+    glb_bytes, info = _Converter(stage, purpose).run()
     info["compositionErrors"] = composition_errors
     info["variantSets"] = _variant_summary(stage)
     return glb_bytes, info

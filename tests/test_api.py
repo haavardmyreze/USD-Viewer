@@ -95,3 +95,35 @@ def test_root_must_be_in_upload(client, scene_dir):
 def test_health_and_static(client):
     assert client.get("/api/health").json()["ok"] is True
     assert "USD Viewer" in client.get("/").text
+
+
+def test_open_path_is_local_only(client, scene_dir):
+    # TestClient is not a loopback client, so the default "auto" mode refuses it
+    res = client.post("/api/open", json={"path": str(scene_dir / "shot.usda")})
+    assert res.status_code == 403
+    assert client.get("/api/health").json()["localPaths"] is False
+
+
+def test_open_path(client, scene_dir, monkeypatch):
+    import server.app as app_module
+
+    monkeypatch.setattr(app_module, "LOCAL_PATHS", "1")
+    # references outside the opened file's folder resolve, because nothing is copied
+    res = client.post("/api/open", json={"path": str(scene_dir / "layers" / "layout.usda")})
+    assert res.status_code == 200, res.text
+    report = res.json()
+    assert report["source"] == "path"
+    assert report["stats"]["meshPrims"] > 0
+    assert client.get(report["glbUrl"]).status_code == 200
+    again = client.post("/api/open", json={"path": str(scene_dir / "layers" / "layout.usda")}).json()
+    assert again["sceneId"] == report["sceneId"]
+
+    # a folder opens its best root layer; purpose changes the scene id
+    folder = client.post("/api/open", json={"path": str(scene_dir), "purpose": "proxy"}).json()
+    assert folder["root"] == "shot.usda" and folder["purpose"] == "proxy"
+    assert folder["rootCandidates"][0] == "shot.usda"
+
+    assert client.post("/api/open", json={"path": "relative/file.usda"}).status_code == 400
+    assert client.post("/api/open", json={"path": str(scene_dir / "nope.usda")}).status_code == 404
+    assert client.post("/api/open", json={"path": str(scene_dir), "purpose": "guide"}).status_code == 400
+    assert client.post("/api/open", json={"path": str(scene_dir), "root": "../../etc/passwd"}).status_code == 400
