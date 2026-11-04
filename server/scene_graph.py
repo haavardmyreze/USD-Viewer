@@ -14,7 +14,7 @@ import threading
 from collections import OrderedDict
 from typing import Any
 
-from pxr import Sdf, Usd
+from pxr import Gf, Sdf, Usd, UsdGeom
 
 #: Children returned for one prim before the list is cut short.
 CHILD_LIMIT = 500
@@ -23,6 +23,8 @@ SUBTREE_LIMIT = 5000
 #: Find: results returned, and prims looked at before giving up.
 FIND_LIMIT = 200
 FIND_BUDGET = 500_000
+#: Other copies of an instance listed for one selection before the list is cut short.
+PEER_LIMIT = 20_000
 #: Stages kept open between requests: opening is the slow part.
 MAX_OPEN_STAGES = 3
 
@@ -172,7 +174,66 @@ class SceneGraph:
             out["opinions"] = self._opinions(prim)
             return out
 
+    def selection(self, prim_path: str, instance: int | None = None) -> dict[str, Any]:
+        """What the 3D view draws for a selection besides the highlight.
+
+        `pivot`: the prim's frame in stage space (USD's row-major local-to-world
+        matrix, at the time the conversion uses) and its pivot point in that frame
+        (an authored `xformOp:translate:pivot`, else the origin); for a
+        PointInstancer instance, that instance's frame. None when the prim has no
+        transform of its own.
+
+        `instances`: the other prims that are the same native instance, i.e. the
+        same prim of the same prototype under every other instance of it.
+        """
+        with STAGES.lock:
+            prim = self._prim(prim_path)
+            if prim.IsPseudoRoot():
+                return {"pivot": None, "instances": [], "truncated": False}
+            time = Usd.TimeCode.EarliestTime()
+            peers, truncated = self._instance_peers(prim)
+            return {"pivot": _pivot(prim, instance, time), "instances": peers, "truncated": truncated}
+
     # -- helpers -------------------------------------------------------------
+
+    def _instance_peers(self, prim: Usd.Prim, limit: int = PEER_LIMIT) -> tuple[list[str], bool]:
+        if prim.IsInstance():
+            in_proto = prim.GetPrototype()
+        elif prim.IsInstanceProxy():
+            in_proto = prim.GetPrimInPrototype()
+            # nested instancing: down to the innermost prototype, so copies of it
+            # placed outside the outer prototype are found too
+            while in_proto and in_proto.IsInstanceProxy():
+                in_proto = in_proto.GetPrimInPrototype()
+        else:
+            return [], False
+        if not in_proto:
+            return [], False
+
+        own = prim.GetPath()
+        out: list[str] = []
+        seen: set[Sdf.Path] = set()
+        pending = [in_proto.GetPath()]
+        while pending:
+            path = pending.pop()
+            if path in seen:
+                continue
+            seen.add(path)
+            root = path.GetPrefixes()[0]  # the prototype, e.g. /__Prototype_1
+            proto = self.stage.GetPrimAtPath(root)
+            if not proto or not proto.IsPrototype():
+                continue
+            rel = path.MakeRelativePath(root)
+            for inst in proto.GetInstances():
+                target = inst.GetPath() if rel == Sdf.Path(".") else inst.GetPath().AppendPath(rel)
+                if inst.IsInPrototype():
+                    pending.append(target)  # inside another prototype: its copies are the copies
+                elif target != own:
+                    out.append(str(target))
+                    if len(out) >= limit:
+                        return sorted(out), True
+        return sorted(out), False
+
 
     def _level(self, prim: Usd.Prim, limit: int) -> tuple[dict[str, Any], list[Usd.Prim]]:
         kids = prim.GetFilteredChildren(PREDICATE)
@@ -261,3 +322,31 @@ def _summary(prim: Usd.Prim) -> dict[str, Any]:
     if prim.HasAuthoredPayloads() and not prim.IsLoaded():
         out["unloaded"] = True
     return out
+
+
+def _pivot(prim: Usd.Prim, instance: int | None, time: Usd.TimeCode) -> dict[str, Any] | None:
+    cache = UsdGeom.XformCache(time)
+    if instance is not None and prim.IsA(UsdGeom.PointInstancer):
+        xforms = UsdGeom.PointInstancer(prim).ComputeInstanceTransformsAtTime(
+            time, time, UsdGeom.PointInstancer.ExcludeProtoXform, UsdGeom.PointInstancer.IgnoreMask)
+        if xforms is None or not 0 <= instance < len(xforms):
+            return None
+        world = Gf.Matrix4d(xforms[instance]) * cache.GetLocalToWorldTransform(prim)
+        return {"matrix": _flat(world), "point": [0.0, 0.0, 0.0]}
+    if not prim.IsA(UsdGeom.Xformable):
+        return None
+    point = [0.0, 0.0, 0.0]
+    for op in UsdGeom.Xformable(prim).GetOrderedXformOps():
+        # XformCommonAPI's pivot: translate:pivot ... !invert!translate:pivot puts
+        # the pivot at that offset in the prim's own frame
+        if op.GetOpType() == UsdGeom.XformOp.TypeTranslate and not op.IsInverseOp() \
+                and op.SplitName()[-1] == "pivot":
+            value = op.Get(time)
+            if value is not None:
+                point = [float(v) for v in value]
+            break
+    return {"matrix": _flat(cache.GetLocalToWorldTransform(prim)), "point": point}
+
+
+def _flat(m: Gf.Matrix4d) -> list[float]:
+    return [float(m[r][c]) for r in range(4) for c in range(4)]

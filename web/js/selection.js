@@ -5,6 +5,10 @@
 // instancer, with each instance's authored index (usdInstanceIds) and the gprim
 // inside the prototype (usdProto).
 //
+// Other copies of the same instance get a fainter highlight in another colour:
+// the other instances of the same prototype in a PointInstancer (found here),
+// and the other copies of a native instance (listed by the server: setPeers).
+//
 // Highlights are overlays: a child of each selected mesh that shares its
 // geometry buffers and instance matrices and draws a translucent tint on top.
 // As a child it follows the mesh's LOD visibility; per-instance selections are
@@ -12,7 +16,11 @@
 import * as THREE from 'three';
 import { HELPER_LAYER } from './picking.js';
 
-const TINT = new THREE.Color(0x0a84ff); // refgraph's selection blue
+/** Per highlight role: tint, base opacity and extra opacity at silhouettes. */
+const LOOKS = {
+  selected: { tint: new THREE.Color(0x0a84ff), alpha: 0.32, rim: 0.38 }, // refgraph's selection blue
+  peer: { tint: new THREE.Color(0xffa63d), alpha: 0.16, rim: 0.28 }, // the other copies: amber, faint
+};
 
 const vertexShader = /* glsl */`
 #include <common>
@@ -36,19 +44,21 @@ void main() {
 
 const fragmentShader = /* glsl */`
 uniform vec3 uTint;
+uniform vec2 uAlpha;
 varying vec3 vViewNormal;
 void main() {
   // a little stronger at grazing angles, so silhouettes read
   float rim = 1.0 - abs( normalize( vViewNormal ).z );
-  gl_FragColor = vec4( uTint, 0.32 + 0.38 * rim * rim );
+  gl_FragColor = vec4( uTint, uAlpha.x + uAlpha.y * rim * rim );
 }
 `;
 
-function makeMaterial(masked, side) {
+function makeMaterial(role, masked, side) {
+  const look = LOOKS[role];
   return new THREE.ShaderMaterial({
     vertexShader,
     fragmentShader,
-    uniforms: { uTint: { value: TINT } },
+    uniforms: { uTint: { value: look.tint }, uAlpha: { value: new THREE.Vector2(look.alpha, look.rim) } },
     defines: masked ? { USE_SEL_MASK: '' } : {},
     transparent: true,
     depthWrite: false,
@@ -72,6 +82,7 @@ export class Selection {
     this.byMesh = new Map();
     this.overlays = new Map();
     this.active = [];
+    this.selected = new Set();
     this.current = null;
     this.materials = new Map();
   }
@@ -183,23 +194,61 @@ export class Selection {
     return box.isEmpty() ? null : box;
   }
 
-  /** Highlight a selection ({ path, instance? }) or nothing (null). */
+  /**
+   * Highlight a selection ({ path, instance? }) or nothing (null). A
+   * PointInstancer instance also lights up the instancer's other instances of
+   * the same prototype.
+   */
   set(sel) {
     this.clear();
     this.current = sel;
-    for (const { entry, instances } of this._match(sel)) {
-      for (const mesh of entry.meshes) {
-        const masked = !!(instances && mesh.isInstancedMesh);
-        const overlay = this._overlayFor(mesh, masked);
-        if (masked) {
-          const chosen = new Uint8Array(this._count(mesh));
-          for (const i of instances) chosen[i] = 1;
-          overlay.userData.chosen = chosen;
-          overlay.userData.version = -1;
+    const matched = this._match(sel);
+    for (const { entry, instances } of matched) this._show('selected', entry, instances);
+    this.selected = new Set(matched.map((m) => m.entry));
+    if (sel?.instance === null || sel?.instance === undefined) return;
+
+    const protos = new Set(matched.map((m) => m.entry.proto));
+    for (const entry of this.entries) {
+      if (entry.path !== sel.path || !protos.has(entry.proto)) continue;
+      if (entry.ids) {
+        const others = [];
+        for (let i = 0; i < entry.ids.length; i++) if (Math.round(entry.ids[i]) !== sel.instance) others.push(i);
+        if (others.length) this._show('peer', entry, others);
+      } else if (entry.instance !== sel.instance) this._show('peer', entry, null);
+    }
+  }
+
+  /**
+   * Also highlight, faintly, the prims at `paths` and everything beneath them
+   * (the other copies of a native instance). Added to the current selection.
+   */
+  setPeers(paths) {
+    if (!paths?.length) return;
+    const wanted = new Set(paths);
+    for (const entry of this.entries) {
+      if (this.selected.has(entry)) continue;
+      // the entry's prim or one of its ancestors is a peer
+      for (let p = entry.path; p.length > 1; p = p.slice(0, Math.max(p.lastIndexOf('/'), 1))) {
+        if (wanted.has(p)) {
+          this._show('peer', entry, null);
+          break;
         }
-        overlay.visible = true;
-        this.active.push(overlay);
       }
+    }
+  }
+
+  _show(role, entry, instances) {
+    for (const mesh of entry.meshes) {
+      const masked = !!(instances && mesh.isInstancedMesh);
+      const overlay = this._overlayFor(mesh, role, masked);
+      if (masked) {
+        const chosen = new Uint8Array(this._count(mesh));
+        for (const i of instances) chosen[i] = 1;
+        overlay.userData.chosen = chosen;
+        overlay.userData.version = -1;
+      }
+      overlay.visible = true;
+      this.active.push(overlay);
     }
   }
 
@@ -211,17 +260,18 @@ export class Selection {
   clear() {
     for (const o of this.active) o.visible = false;
     this.active = [];
+    this.selected = new Set();
     this.current = null;
   }
 
-  _material(masked, side) {
-    const key = `${masked}:${side}`;
-    if (!this.materials.has(key)) this.materials.set(key, makeMaterial(masked, side));
+  _material(role, masked, side) {
+    const key = `${role}:${masked}:${side}`;
+    if (!this.materials.has(key)) this.materials.set(key, makeMaterial(role, masked, side));
     return this.materials.get(key);
   }
 
-  _overlayFor(mesh, masked) {
-    const key = `${masked}`;
+  _overlayFor(mesh, role, masked) {
+    const key = `${role}:${masked}`;
     let byKind = this.overlays.get(mesh);
     if (!byKind) {
       byKind = {};
@@ -237,7 +287,7 @@ export class Selection {
     else geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(src.attributes.position.count * 3), 3));
     for (const group of src.groups) geometry.addGroup(group.start, group.count, group.materialIndex);
     const side = (Array.isArray(mesh.material) ? mesh.material[0] : mesh.material)?.side ?? THREE.FrontSide;
-    const material = this._material(masked, side);
+    const material = this._material(role, masked, side);
 
     let overlay;
     if (mesh.isInstancedMesh) {
@@ -273,7 +323,7 @@ export class Selection {
     overlay.frustumCulled = false;
     overlay.castShadow = false;
     overlay.receiveShadow = false;
-    overlay.renderOrder = 10;
+    overlay.renderOrder = role === 'selected' ? 11 : 10; // the selection tints over its peers
     overlay.layers.set(HELPER_LAYER);
     overlay.visible = false;
     overlay.matrixAutoUpdate = false; // identity: the parent's transform is the mesh's

@@ -4,6 +4,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { Navigation } from './navigation.js';
 import { HELPER_LAYER, Picker } from './picking.js';
 import { LodManager } from './lod.js';
+import { PivotGizmo } from './pivot.js';
 import { Selection } from './selection.js';
 import { ShadingMaterials } from './shading.js';
 import { applyTriplanarToScene } from './triplanar.js';
@@ -57,6 +58,8 @@ export class Viewer {
     this.nav.lookAt(new THREE.Vector3());
     this.lod = new LodManager();
     this.selection = new Selection(this.lod);
+    this.pivot = new PivotGizmo();
+    this.scene.add(this.pivot.object);
 
     this.model = null;
     this.bounds = new THREE.Box3(new THREE.Vector3(-5, 0, -5), new THREE.Vector3(5, 2, 5));
@@ -106,6 +109,7 @@ export class Viewer {
   setModel(gltf, { keepView = false } = {}) {
     if (this.model) {
       this.selection.clear();
+      this.pivot.hide();
       this._restoreMaterials();
       this.scene.remove(this.model);
       disposeObject(this.model);
@@ -127,6 +131,8 @@ export class Viewer {
     this.model = model;
     this.scene.add(model);
     model.updateMatrixWorld(true);
+    // USD stage space -> view: the converter's up-axis and units correction
+    this.stageToWorld = (main.getObjectByName('usd_stage_root') ?? main).matrixWorld.clone();
     this.lod.setup(model);
     const pickable = [];
     model.traverse((o) => { if (o.isMesh) pickable.push(o); });
@@ -203,6 +209,24 @@ export class Viewer {
   /** Highlight a selection ({ path, instance? }) or nothing (null). */
   select(sel) {
     this.selection.set(sel);
+    this.selection.sync();
+    this.pivot.hide();
+    this.invalidate();
+  }
+
+  /**
+   * What the server knows about the current selection (GET .../selection):
+   * its pivot, drawn as a tripod, and the other copies of its instance, which
+   * get a fainter highlight.
+   */
+  showSelectionInfo(info) {
+    if (!this.model) return;
+    if (info.pivot) {
+      const frame = new THREE.Matrix4().fromArray(info.pivot.matrix); // USD row-major = three column-major
+      frame.premultiply(this.stageToWorld);
+      this.pivot.show(frame, new THREE.Vector3().fromArray(info.pivot.point));
+    } else this.pivot.hide();
+    this.selection.setPeers(info.instances);
     this.selection.sync();
     this.invalidate();
   }
@@ -482,6 +506,7 @@ export class Viewer {
     const detail = DETAIL_LEVELS[this.options.detail] ?? 1;
     this.lod.update(this.camera, refine ? Math.max(detail * 2, 2) : detail);
     this.selection.sync();
+    this.pivot.update(this.camera, this.canvas.clientHeight);
     this.renderer.render(this.scene, this.camera);
 
     this.lastFrame = { triangles: this.renderer.info.render.triangles, refined: refine };

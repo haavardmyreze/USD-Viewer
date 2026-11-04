@@ -126,6 +126,11 @@ Selecting works both ways. A prim picked in the tree is highlighted in the view
 (everything under it, or the instances of a prototype); double-click or **F**
 frames it. Clicking geometry opens the tree onto its prim; a PointInstancer
 instance selects the instancer and names the instance (`…/PointInstancer[4]`).
+The selected prim's pivot is drawn as an axis gizmo (X red, Y green, Z blue, in the
+prim's own frame, at its `xformOp:translate:pivot` when one is authored). The other
+copies of the same instance get a fainter amber highlight: for a native instance (or
+a prim inside one), the same prim under every other instance of its prototype; for a
+PointInstancer instance, the instancer's other instances of the same prototype.
 The detail panel shows the prim's type, kind, schemas and how much of it is drawn,
 and every layer with an opinion on it, strongest first.
 

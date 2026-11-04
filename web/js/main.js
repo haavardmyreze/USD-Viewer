@@ -369,7 +369,7 @@ async function loadReport(next, { same = false } = {}) {
   showReport(next);
   graph.setScene(next.sceneId, { keep: same });
   renderVariants();
-  viewer.select(graph.selection);
+  void showSelection(graph.selection);
   hideLoading();
 }
 
@@ -579,7 +579,7 @@ function togglePurpose() {
 // -- scene graph ------------------------------------------------------------------------
 
 const graph = new SceneGraph($('graph-body'), {
-  onSelect: (sel) => viewer.select(sel),
+  onSelect: (sel) => showSelection(sel),
   onFrame: (path) => {
     if (!viewer.frameSelection({ path, instance: graph.selection?.path === path ? graph.selection.instance : null })) {
       toast('Nothing under this prim is drawn in the view', 'ok');
@@ -590,15 +590,35 @@ const graph = new SceneGraph($('graph-body'), {
   onVariant: (path, set, value) => setVariant(path, set, value),
 });
 
+/**
+ * Highlight a selection in the view, then add what the server knows about it:
+ * its pivot and the other copies of its instance.
+ */
+let selectionRequest = 0;
+async function showSelection(sel) {
+  viewer.select(sel);
+  const ticket = ++selectionRequest;
+  const sceneId = graph.sceneId;
+  if (!sel || !sceneId) return;
+  const query = new URLSearchParams({ path: sel.path });
+  if (Number.isInteger(sel.instance)) query.set('instance', String(sel.instance));
+  try {
+    const res = await fetch(`/api/scenes/${encodeURIComponent(sceneId)}/selection?${query}`);
+    if (!res.ok) return; // the highlight alone still shows the selection
+    const info = await res.json();
+    if (ticket === selectionRequest && graph.sceneId === sceneId) viewer.showSelectionInfo(info);
+  } catch { /* offline: keep the plain highlight */ }
+}
+
 /** Select from the 3D view (or clear with null); the tree opens onto the prim. */
 function selectFromView(hit) {
   if (!hit) {
-    viewer.select(null);
+    void showSelection(null);
     void graph.reveal(null);
     return;
   }
   const sel = { path: hit.path, instance: hit.instance ?? null };
-  viewer.select(sel);
+  void showSelection(sel);
   void graph.reveal(sel.path, sel.instance);
 }
 

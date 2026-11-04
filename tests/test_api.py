@@ -174,6 +174,16 @@ def test_scene_graph_api(client, scene_dir):
     assert not found["truncated"]
     assert client.get(f"{base}/find", params={"q": ""}).json()["results"] == []
 
+    # a selection's pivot, and the other copies of the instance it is part of
+    sel = client.get(f"{base}/selection", params={"path": "/World/Crates/crate_2_2/geo"}).json()
+    assert len(sel["instances"]) == 8 and "/World/Crates/crate_0_0/geo" in sel["instances"]
+    assert sel["pivot"]["matrix"][12:15] == [150.0, 600.0, 0.0] and sel["pivot"]["point"] == [0.0, 0.0, 0.0]
+    crate = client.get(f"{base}/selection", params={"path": "/World/Crates/crate_0_1"}).json()
+    assert len(crate["instances"]) == 8 and "/World/Crates/crate_0_1" not in crate["instances"]
+    ball = client.get(f"{base}/selection", params={"path": "/World/Ball"}).json()
+    assert ball["instances"] == [] and ball["pivot"]["matrix"][12:15] == [300.0, -200.0, 40.0]
+    assert client.get(f"{base}/selection", params={"path": "/World/Nope"}).status_code == 404
+
     assert client.get(f"{base}/prim", params={"path": "/World/Nope"}).status_code == 404
     assert client.get(f"{base}/prim", params={"path": "not a path"}).status_code == 400
     assert client.get("/api/scenes/doesnotexist/prims").status_code == 404

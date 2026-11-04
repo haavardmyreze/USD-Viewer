@@ -410,6 +410,12 @@ def scene_prim(scene_id: str, path: str):
     return _graph_call(scene_id, lambda g: g.detail(path))
 
 
+@app.get("/api/scenes/{scene_id}/selection")
+def scene_selection(scene_id: str, path: str, instance: int | None = None):
+    """A selection's pivot (frame and point) and the other copies of its instance."""
+    return _graph_call(scene_id, lambda g: g.selection(path, instance))
+
+
 @app.get("/api/health")
 def health(request: Request):
     from pxr import Usd
