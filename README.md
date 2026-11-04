@@ -48,6 +48,10 @@ missing, so drop the project root instead. Path opening is offered only to a bro
 the same machine as the server (see `USDV_LOCAL_PATHS`). Scenes opened by path are
 re-converted automatically when any layer or texture changes on disk.
 
+**On Windows**, just double-click `Start.bat`. The first run creates `.venv` and
+installs the dependencies; after that it starts straight away and opens the
+browser. Run `Start.bat 8080` to use a different port.
+
 Or with Docker:
 
 ```bash
