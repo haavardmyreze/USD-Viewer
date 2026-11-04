@@ -69,17 +69,35 @@ python -m tests.make_scene sample_scene
 
 | Input | Action |
 | --- | --- |
-| Click | Capture the mouse to look around (Esc releases) |
-| Right-drag | Look without capturing the mouse |
-| W A S D / arrows | Fly in the view direction |
-| E / Q (or Space / C) | Up / down |
-| Shift / Ctrl | 4× faster / 4× slower |
-| Mouse wheel | Change base fly speed |
+| Left-drag | Orbit around the point under the cursor |
+| Shift + left-drag / middle-drag | Pan |
+| Scroll | Zoom towards the point under the cursor |
+| Right-drag | Look around; W A S D fly while it is held |
+| Right-drag + scroll | Change fly speed |
+| Double-click | Fly to the point under the cursor |
+| W A S D / arrows, E / Q | Fly (also without the mouse), up / down |
+| Shift / Ctrl | 4x faster / 4x slower |
 | F | Frame the whole scene |
-| G | Toggle grid |
-| B | Force double-sided materials (handy for flipped normals) |
-| I | Hide / show the side panel |
-| P | Toggle proxy geometry (proxy-purpose prims instead of render-purpose ones) |
+| G / L / B / P | Grid, shadows, double-sided, proxy geometry |
+| I / O / ? | Inspector, open another scene, controls help |
+
+On touch screens one finger orbits and two fingers pan and pinch-zoom.
+
+## Performance
+
+Heavy scenes stay interactive because:
+
+- The converter writes simplified levels of detail (each about a quarter of the
+  previous) for meshes with 20k+ triangles. The viewer culls every instance
+  against the view and picks a level by its size on screen.
+- Frames are only drawn when something changes. While the camera moves, detail and
+  resolution adapt to keep it smooth; when it stops, one sharper frame is drawn.
+- Shadows are rendered once per scene, not every frame.
+- Picking (orbit pivot, zoom target, double-click) reads depth from the GPU, so it
+  costs the same for any amount of geometry.
+
+The Detail control in the inspector trades quality for speed (Fast, Balanced, High,
+Full = always full resolution).
 
 The URL keeps the upload id and root layer (`#upload=…&root=…`), so a reload
 restores the scene for as long as the upload is kept on the server (48 h by default).
@@ -121,6 +139,8 @@ cameras and lights. These are listed in the viewer's warnings when present.
 | `USDV_MAX_UPLOAD_MB` | `4096` | Maximum upload size (also applies to unzipped archives) |
 | `USDV_MAX_AGE_HOURS` | `48` | Uploads and scenes older than this are pruned |
 | `USDV_MAX_TEXTURE_SIZE` | `2048` | Longest texture side in the GLB; `0` keeps originals |
+| `USDV_LODS` | `1` | Generate levels of detail (`0` to disable) |
+| `USDV_LOD_MIN_TRIANGLES` | `20000` | Meshes with fewer triangles get no LODs |
 | `USDV_LOCAL_PATHS` | `auto` | Open-by-path: `auto` = only for browsers on the server machine, `1` = always, `0` = never |
 
 ## API

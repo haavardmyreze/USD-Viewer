@@ -281,3 +281,55 @@ def test_materialx_triplanar_material(tmp_path):
     assert images["bc.png"]["mimeType"] == "image/jpeg"
     assert images["orm.png"]["mimeType"] == "image/png"
     assert any("hex-tiled" in w for w in info["warnings"])
+
+
+def _dense_grid_stage(path, n=170):
+    """One wavy n x n quad grid (~2 n^2 triangles), instanced twice by a PointInstancer."""
+    stage = Usd.Stage.CreateNew(str(path))
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
+    xs, zs = np.meshgrid(np.linspace(0, 10, n + 1), np.linspace(0, 10, n + 1))
+    pts = np.stack([xs, np.sin(xs) * np.cos(zs) * 0.5, zs], -1).reshape(-1, 3)
+    i = np.arange(n)
+    a = (i[:, None] * (n + 1) + i[None, :]).reshape(-1)
+    quads = np.stack([a, a + 1, a + n + 2, a + n + 1], 1).reshape(-1)
+    pi = UsdGeom.PointInstancer.Define(stage, "/World/Tiles")
+    mesh = UsdGeom.Mesh.Define(stage, "/World/Tiles/Prototypes/Tile")
+    mesh.CreatePointsAttr([Gf.Vec3f(*map(float, p)) for p in pts])
+    mesh.CreateFaceVertexCountsAttr([4] * (n * n))
+    mesh.CreateFaceVertexIndicesAttr([int(x) for x in quads])
+    mesh.CreateSubdivisionSchemeAttr("none")
+    pi.CreatePrototypesRel().SetTargets([mesh.GetPath()])
+    pi.CreateProtoIndicesAttr([0, 0])
+    pi.CreatePositionsAttr([(0, 0, 0), (20, 0, 0)])
+    stage.Save()
+    return path
+
+
+def test_levels_of_detail(tmp_path):
+    data, info = convert(str(_dense_grid_stage(tmp_path / "dense.usda")))
+    gltf, binary = parse_glb(data)
+    assert info["stats"]["uniqueMeshes"] == 1
+    assert info["stats"]["lodMeshes"] >= 2
+    # LOD copies live in a second scene, so other glTF viewers show only the default scene
+    assert gltf["scene"] == 0 and gltf["scenes"][1]["name"] == "usdv_lods"
+    tagged = [n for n in gltf["nodes"] if "usdvLod" in n.get("extras", {})]
+    levels = sorted(tagged, key=lambda n: n["extras"]["usdvLod"]["level"])
+    assert [n["extras"]["usdvLod"]["level"] for n in levels] == list(range(len(levels)))
+    assert len({n["extras"]["usdvLod"]["group"] for n in levels}) == 1
+    # every level shares the same instance transforms and has ~1/4 the triangles of the one before
+    inst = {tuple(sorted(n["extensions"]["EXT_mesh_gpu_instancing"]["attributes"].items())) for n in levels}
+    assert len(inst) == 1
+    tris = [sum(gltf["accessors"][p["indices"]]["count"] // 3 for p in gltf["meshes"][n["mesh"]]["primitives"])
+            for n in levels]
+    assert all(b < a * 0.4 for a, b in zip(tris, tris[1:]))
+    for n in levels[1:]:
+        normals = accessor(gltf, binary, gltf["meshes"][n["mesh"]]["primitives"][0]["attributes"]["NORMAL"])
+        assert np.allclose(np.linalg.norm(normals, axis=1), 1.0, atol=1e-4)
+
+
+def test_lods_can_be_disabled(tmp_path, monkeypatch):
+    import server.usd_to_glb as conv
+
+    monkeypatch.setattr(conv, "LOD_ENABLED", False)
+    gltf, _ = parse_glb(convert(str(_dense_grid_stage(tmp_path / "dense.usda")))[0])
+    assert len(gltf["scenes"]) == 1 and len(gltf["meshes"]) == 1

@@ -127,6 +127,10 @@ class GlbBuilder:
             self.gltf["scenes"][0]["nodes"].append(idx)
         return idx
 
+    def add_scene(self, name: str, nodes: list[int]) -> int:
+        self.gltf["scenes"].append({"name": name, "nodes": nodes})
+        return len(self.gltf["scenes"]) - 1
+
     # -- output -----------------------------------------------------------
 
     def to_bytes(self) -> bytes:

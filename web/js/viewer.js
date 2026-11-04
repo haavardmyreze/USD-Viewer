@@ -1,129 +1,212 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { FlyControls } from './flyControls.js';
+import { Navigation } from './navigation.js';
+import { HELPER_LAYER, Picker } from './picking.js';
+import { LodManager } from './lod.js';
 import { applyTriplanarToScene } from './triplanar.js';
 
+const SUN_DIRECTION = new THREE.Vector3(0.55, 0.7, 0.4).normalize();
+/** Detail presets: multiplier on the screen size at which lower LODs kick in. */
+export const DETAIL_LEVELS = { fast: 0.5, balanced: 1, high: 2.5, full: Infinity };
+const SHADOW_TRIANGLE_BUDGET = 6e6;
+
+/**
+ * Renders on demand: a frame is drawn only when the camera or a setting changes.
+ * While the camera moves, detail and resolution adapt to keep it smooth; once it
+ * stops, one full-quality frame is drawn.
+ */
 export class Viewer {
   constructor(canvas) {
     this.canvas = canvas;
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this.renderer.toneMapping = THREE.NeutralToneMapping;
-    this.renderer.toneMappingExposure = 1.0;
+    const renderer = new THREE.WebGLRenderer({
+      canvas, antialias: true, alpha: true, powerPreference: 'high-performance',
+    });
+    this.renderer = renderer;
+    this.maxPixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    this.interactiveRatio = this.maxPixelRatio;
+    renderer.setPixelRatio(this.maxPixelRatio);
+    renderer.setClearColor(0x000000, 0); // the page background shows through
+    renderer.toneMapping = THREE.NeutralToneMapping;
+    renderer.toneMappingExposure = 1.0;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.autoUpdate = false; // static scene: shadows are rendered once
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x2a2d33);
-
-    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    const pmrem = new THREE.PMREMGenerator(renderer);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    this.scene.environmentIntensity = 0.7;
+    this.scene.environmentIntensity = 0.55;
     pmrem.dispose();
 
-    this.sun = new THREE.DirectionalLight(0xffffff, 1.2);
-    this.sun.position.set(0.5, 1, 0.3);
+    this.sun = new THREE.DirectionalLight(0xfff3e2, 2.0);
+    this.sun.castShadow = true;
+    this.sun.shadow.mapSize.set(4096, 4096);
+    this.sun.shadow.bias = -0.0002;
     this.scene.add(this.sun, this.sun.target);
-    this.scene.add(new THREE.HemisphereLight(0xdde6ff, 0x3a3326, 0.3));
+    this.scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x4a4236, 0.35));
 
-    this.camera = new THREE.PerspectiveCamera(60, 1, 0.01, 10000);
-    this.camera.position.set(0, 1.7, 5);
-    this.controls = new FlyControls(this.camera, canvas);
+    this.camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
+    this.camera.layers.enable(HELPER_LAYER);
+    this.camera.position.set(6, 4, 8);
+
+    this.picker = new Picker(renderer);
+    this.nav = new Navigation(this.camera, canvas, (x, y) => this.pick(x, y));
+    this.nav.lookAt(new THREE.Vector3());
+    this.lod = new LodManager();
 
     this.model = null;
-    this.grid = null;
     this.bounds = new THREE.Box3(new THREE.Vector3(-5, 0, -5), new THREE.Vector3(5, 2, 5));
-    this.forceDoubleSided = false;
+    this.radius = 8;
+    this.options = { grid: true, shadows: true, doubleSided: false, detail: 'balanced' };
     this._originalSides = new Map();
+    this.ground = null;
+    this.grid = null;
 
     this.loader = new GLTFLoader();
     this.clock = new THREE.Clock();
+    this._lastView = new THREE.Matrix4();
+    this._lastMove = 0;
+    this._dirty = true;
+    this._needsRefine = true;
+    this._shadowsDirty = false;
+    this._frameMs = 16;
+    this._lastRenderAt = 0;
+    this.lastFrame = { triangles: 0, refined: false };
 
-    window.addEventListener('resize', () => this._resize());
+    this._buildHelpers();
+    new ResizeObserver(() => this._resize()).observe(canvas);
     this._resize();
-    this.renderer.setAnimationLoop(() => this._tick());
+    renderer.setAnimationLoop(() => this._tick());
   }
+
+  // -- loading ---------------------------------------------------------------
 
   async loadGlb(url, onProgress) {
     const gltf = await this.loader.loadAsync(url, (e) => {
       if (e.lengthComputable) onProgress?.(e.loaded / e.total);
     });
-    applyTriplanarToScene(gltf.scene);
-    this.setModel(gltf.scene);
+    for (const s of gltf.scenes) applyTriplanarToScene(s);
+    this.setModel(gltf);
     return gltf;
   }
 
-  setModel(object) {
+  setModel(gltf) {
     if (this.model) {
       this.scene.remove(this.model);
       disposeObject(this.model);
     }
     this._originalSides.clear();
-    this.model = object;
-    this.scene.add(object);
-    object.updateMatrixWorld(true);
-
-    this.bounds = new THREE.Box3().setFromObject(object, true);
-    if (this.bounds.isEmpty()) this.bounds.set(new THREE.Vector3(-1, -1, -1), new THREE.Vector3(1, 1, 1));
-    this._fitClipPlanes();
-    this._placeSun();
-    this.setDoubleSided(this.forceDoubleSided);
-    if (this.grid) this.setGrid(true);
-    this.frameScene();
-  }
-
-  stats() {
-    let meshes = 0;
-    let triangles = 0;
-    this.model?.traverse((o) => {
-      if (!o.isMesh) return;
-      meshes += 1;
-      const g = o.geometry;
-      triangles += (g.index ? g.index.count : g.attributes.position.count) / 3;
+    const model = new THREE.Group();
+    model.name = 'model';
+    const main = gltf.scene;
+    model.add(main);
+    // simplified levels of detail live in a second glTF scene
+    for (const s of gltf.scenes) if (s !== main && s.name === 'usdv_lods') model.add(s);
+    model.traverse((o) => {
+      if (o.isMesh) {
+        o.castShadow = true;
+        o.receiveShadow = true;
+      }
     });
-    const size = this.bounds.getSize(new THREE.Vector3());
-    return { meshes, triangles, size };
+    this.model = model;
+    this.scene.add(model);
+    model.updateMatrixWorld(true);
+    this.lod.setup(model);
+
+    // bounds: plain meshes + every managed instance (ignores the LOD copies)
+    const managed = new Set(this.lod.groups.flatMap((g) => g.levels.flat()));
+    const box = new THREE.Box3();
+    main.traverse((o) => {
+      if (!o.isMesh || managed.has(o)) return;
+      if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+      box.union(o.geometry.boundingBox.clone().applyMatrix4(o.matrixWorld));
+    });
+    this.lod.expandBox(box);
+    if (box.isEmpty()) box.set(new THREE.Vector3(-1, -1, -1), new THREE.Vector3(1, 1, 1));
+    this.bounds = box;
+    this.radius = Math.max(box.getBoundingSphere(new THREE.Sphere()).radius, 0.05);
+    this.fullTriangles = this.lod.groups.reduce((n, g) => n + g.count * g.tris[0], 0);
+    main.traverse((o) => {
+      if (o.isMesh && !managed.has(o)) {
+        const g = o.geometry;
+        this.fullTriangles += (g.index ? g.index.count : g.attributes.position.count) / 3;
+      }
+    });
+
+    this.nav.setSceneRadius(this.radius);
+    this._placeHelpers();
+    this._placeSun();
+    this.setDoubleSided(this.options.doubleSided);
+    this.frameScene(false);
+    this.nav.update(0);
+    this._warmUp();
+    this.invalidate();
   }
 
-  /** Put the camera outside the scene looking at its centre, eye-level-ish. */
-  frameScene() {
-    const center = this.bounds.getCenter(new THREE.Vector3());
-    const size = this.bounds.getSize(new THREE.Vector3());
-    const radius = Math.max(size.length() / 2, 0.1);
-    const fov = THREE.MathUtils.degToRad(this.camera.fov);
-    const dist = radius / Math.sin(fov / 2) * 0.9;
+  /** Compile shaders and upload every mesh and texture now, not mid-flight. */
+  _warmUp() {
+    this.lod.showAllLevels();
+    this.camera.updateMatrixWorld();
+    this._updateClipPlanes();
+    this.renderer.compile(this.scene, this.camera);
+    this.renderer.render(this.scene, this.camera);
+  }
 
-    const dir = new THREE.Vector3(0.6, 0.45, 1).normalize();
-    this.camera.position.copy(center).addScaledVector(dir, dist);
-    this.controls.lookAt(center);
-    this.controls.stop();
-    // crossing the scene in ~10 s at base speed feels right for most sizes
-    this.controls.setSpeed(Math.max(radius / 5, 0.05));
+  // -- view ------------------------------------------------------------------
+
+  /** Camera pose that shows the whole scene from a three-quarter view. */
+  frameScene(animate = true) {
+    const center = this.bounds.getCenter(new THREE.Vector3());
+    const fov = THREE.MathUtils.degToRad(this.camera.fov);
+    const aspect = Number.isFinite(this.camera.aspect) && this.camera.aspect > 0 ? this.camera.aspect : 1.6;
+    const fitH = this.radius / Math.sin(fov / 2);
+    const fitW = this.radius / Math.sin(Math.atan(Math.tan(fov / 2) * aspect));
+    const dist = Math.max(fitH, fitW) * 0.9;
+    const dir = new THREE.Vector3(0.62, 0.42, 1).normalize();
+    const pos = center.clone().addScaledVector(dir, dist);
+    this.nav.flyTo(pos, center, animate ? 0.6 : 0);
+    this.invalidate();
+  }
+
+  /** World point under canvas pixel (x, y), or null. */
+  pick(x, y) {
+    if (!this.model) return null;
+    this.camera.updateMatrixWorld();
+    return this.picker.pick(this.scene, this.camera, x, y);
+  }
+
+  invalidate() {
+    this._dirty = true;
+    this._needsRefine = true;
   }
 
   setGrid(on) {
-    if (this.grid) {
-      this.scene.remove(this.grid);
-      this.grid.geometry.dispose();
-      this.grid.material.dispose();
-      this.grid = null;
-    }
-    if (!on) return;
-    const size = this.bounds.getSize(new THREE.Vector3());
-    const extent = Math.max(size.x, size.z, 1) * 1.5;
-    // grid lines on a "nice" metre spacing
-    const step = Math.pow(10, Math.floor(Math.log10(extent / 10)));
-    const divisions = Math.min(Math.ceil(extent / step), 1000);
-    this.grid = new THREE.GridHelper(divisions * step, divisions, 0x6a7080, 0x41454e);
-    const c = this.bounds.getCenter(new THREE.Vector3());
-    // sit just below the lowest geometry so the grid never z-fights a floor
-    this.grid.position.set(c.x, this.bounds.min.y - size.length() * 1e-3, c.z);
-    this.grid.material.transparent = true;
-    this.grid.material.opacity = 0.6;
-    this.scene.add(this.grid);
+    this.options.grid = on;
+    if (this.grid) this.grid.visible = on;
+    this.invalidate();
+  }
+
+  setShadows(on) {
+    this.options.shadows = on;
+    this.sun.castShadow = on;
+    if (this.ground) this.ground.visible = on;
+    this._shadowsDirty = on;
+    this.invalidate();
+  }
+
+  setExposure(v) {
+    this.renderer.toneMappingExposure = v;
+    this.invalidate();
+  }
+
+  setDetail(name) {
+    if (name in DETAIL_LEVELS) this.options.detail = name;
+    this.invalidate();
   }
 
   setDoubleSided(on) {
-    this.forceDoubleSided = on;
+    this.options.doubleSided = on;
     this.model?.traverse((o) => {
       if (!o.isMesh) return;
       for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
@@ -132,48 +215,210 @@ export class Viewer {
         m.needsUpdate = true;
       }
     });
+    this.invalidate();
   }
 
-  // -- internals -----------------------------------------------------------
+  stats() {
+    return {
+      fullTriangles: this.fullTriangles || 0,
+      drawnTriangles: this.lastFrame.triangles,
+      instances: this.lod.stats.total,
+      visibleInstances: this.lod.stats.visible,
+      size: this.bounds.getSize(new THREE.Vector3()),
+      pixelRatio: this.renderer.getPixelRatio(),
+      frameMs: this._frameMs,
+    };
+  }
 
-  _fitClipPlanes() {
-    const radius = Math.max(this.bounds.getSize(new THREE.Vector3()).length() / 2, 0.1);
-    this.camera.near = Math.max(radius * 1e-5, 1e-4);
-    this.camera.far = radius * 200;
-    this.camera.updateProjectionMatrix();
+  // -- helpers (ground shadow + grid) -------------------------------------------
+
+  _buildHelpers() {
+    const plane = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+    this.ground = new THREE.Mesh(plane, new THREE.ShadowMaterial({ opacity: 0.3, depthWrite: false }));
+    this.ground.receiveShadow = true;
+    this.ground.layers.set(HELPER_LAYER);
+    this.ground.renderOrder = -2;
+
+    this.grid = new THREE.Mesh(plane, new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      uniforms: {
+        uSpacing: { value: 1 },
+        uFade: { value: 50 },
+        uColor: { value: new THREE.Color(0x9aa3b5) },
+        uOpacity: { value: 0.32 },
+      },
+      vertexShader: /* glsl */`
+        varying vec3 vWorld;
+        void main() {
+          vec4 w = modelMatrix * vec4( position, 1.0 );
+          vWorld = w.xyz;
+          gl_Position = projectionMatrix * viewMatrix * w;
+        }`,
+      fragmentShader: /* glsl */`
+        varying vec3 vWorld;
+        uniform float uSpacing;
+        uniform float uFade;
+        uniform float uOpacity;
+        uniform vec3 uColor;
+        float line( float spacing ) {
+          vec2 c = vWorld.xz / spacing;
+          vec2 g = abs( fract( c - 0.5 ) - 0.5 ) / fwidth( c );
+          return 1.0 - min( min( g.x, g.y ), 1.0 );
+        }
+        void main() {
+          float d = distance( cameraPosition.xz, vWorld.xz );
+          float fade = 1.0 - smoothstep( uFade * 0.25, uFade, d );
+          float a = max( line( uSpacing ) * 0.4, line( uSpacing * 10.0 ) ) * uOpacity * fade;
+          if ( a < 0.004 ) discard;
+          gl_FragColor = vec4( uColor, a );
+        }`,
+    }));
+    this.grid.layers.set(HELPER_LAYER);
+    this.grid.renderOrder = -1;
+    this.scene.add(this.ground, this.grid);
+  }
+
+  _placeHelpers() {
+    const c = this.bounds.getCenter(new THREE.Vector3());
+    const r = this.radius;
+    const y = this.bounds.min.y - r * 2e-4;
+    for (const h of [this.ground, this.grid]) {
+      h.position.set(c.x, y, c.z);
+      h.scale.setScalar(r * 40);
+    }
+    // grid spacing: a power of ten that gives ~10-100 lines across the scene
+    this.grid.material.uniforms.uSpacing.value = Math.pow(10, Math.floor(Math.log10(Math.max(r / 5, 1e-3))));
+    this.grid.material.uniforms.uFade.value = r * 6;
+    this.grid.visible = this.options.grid;
+    this.ground.visible = this.options.shadows;
   }
 
   _placeSun() {
     const c = this.bounds.getCenter(new THREE.Vector3());
-    const r = this.bounds.getSize(new THREE.Vector3()).length();
+    const r = this.radius;
     this.sun.target.position.copy(c);
-    this.sun.position.copy(c).add(new THREE.Vector3(0.5, 1, 0.3).multiplyScalar(r));
+    this.sun.position.copy(c).addScaledVector(SUN_DIRECTION, r * 2);
+    const cam = this.sun.shadow.camera;
+    cam.left = -r * 1.02;
+    cam.right = r * 1.02;
+    cam.top = r * 1.02;
+    cam.bottom = -r * 1.02;
+    cam.near = r * 0.5;
+    cam.far = r * 3.5;
+    cam.updateProjectionMatrix();
+    // about one shadow-map texel, so surfaces don't shadow themselves
+    this.sun.shadow.normalBias = (2 * r) / this.sun.shadow.mapSize.x * 1.5;
+    this.sun.updateMatrixWorld();
+    this.sun.target.updateMatrixWorld();
+    this._shadowsDirty = this.options.shadows;
   }
 
+  /** Render the shadow map once, with every instance at a level that fits the budget. */
+  _renderShadows() {
+    const groups = this.lod.groups;
+    const maxLevels = Math.max(1, ...groups.map((g) => g.levels.length));
+    let level = 0;
+    while (level < maxLevels - 1
+      && groups.reduce((n, g) => n + g.count * g.tris[Math.min(level, g.levels.length - 1)], 0) > SHADOW_TRIANGLE_BUDGET) {
+      level += 1;
+    }
+    this.lod.update(this.camera, 1, { cull: false, level });
+    this.renderer.shadowMap.needsUpdate = true;
+    this.renderer.render(this.scene, this.camera);
+    this._shadowsDirty = false;
+  }
+
+  // -- frame loop ---------------------------------------------------------------
+
   _resize() {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
+    const w = this.canvas.clientWidth || window.innerWidth;
+    const h = this.canvas.clientHeight || window.innerHeight;
+    if (!w || !h) return; // hidden (e.g. background tab): keep the last size
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    this.invalidate();
+  }
+
+  _updateClipPlanes() {
+    // keep the near plane as far out as possible for depth precision
+    const r = this.radius;
+    const outside = this.bounds.distanceToPoint(this.camera.position);
+    const near = THREE.MathUtils.clamp(outside * 0.3, r * 2e-4, r * 0.5);
+    const far = outside + r * 4;
+    if (Math.abs(near - this.camera.near) / near > 0.05 || Math.abs(far - this.camera.far) / far > 0.05) {
+      this.camera.near = near;
+      this.camera.far = far;
+      this.camera.updateProjectionMatrix();
+    }
+  }
+
+  _setPixelRatio(ratio) {
+    if (Math.abs(ratio - this.renderer.getPixelRatio()) < 0.02) return;
+    this.renderer.setPixelRatio(ratio);
+    this.renderer.setSize(this.canvas.clientWidth, this.canvas.clientHeight, false);
   }
 
   _tick() {
+    const now = performance.now();
     const dt = Math.min(this.clock.getDelta(), 0.1);
-    this.controls.update(dt);
+    this.nav.update(dt);
+    this.camera.updateMatrixWorld();
+    if (!this._lastView.equals(this.camera.matrixWorld)) {
+      this._lastMove = now;
+      this._dirty = true;
+      this._needsRefine = true;
+    }
+
+    const refine = !this._dirty && this._needsRefine && now - this._lastMove > 200;
+    if (!this._dirty && !refine) {
+      this.onFrame?.(false);
+      return;
+    }
+
+    if (refine) {
+      this._setPixelRatio(this.maxPixelRatio);
+    } else {
+      // while moving: trade resolution for frame rate (consecutive frames only)
+      const interval = now - this._lastRenderAt;
+      if (interval < 250) {
+        this._frameMs += (interval - this._frameMs) * 0.2;
+        if (this._frameMs > 30 && this.interactiveRatio > 0.5) this.interactiveRatio *= 0.85;
+        else if (this._frameMs < 18 && this.interactiveRatio < this.maxPixelRatio) {
+          this.interactiveRatio = Math.min(this.maxPixelRatio, this.interactiveRatio * 1.08);
+        }
+      }
+      this._setPixelRatio(this.interactiveRatio);
+    }
+
+    this._updateClipPlanes();
+    if (this._shadowsDirty && this.options.shadows && this.model) this._renderShadows();
+    const detail = DETAIL_LEVELS[this.options.detail] ?? 1;
+    this.lod.update(this.camera, refine ? Math.max(detail * 2, 2) : detail);
     this.renderer.render(this.scene, this.camera);
-    this.onFrame?.();
+
+    this.lastFrame = { triangles: this.renderer.info.render.triangles, refined: refine };
+    this._lastView.copy(this.camera.matrixWorld);
+    this._lastRenderAt = now;
+    this._dirty = false;
+    if (refine) this._needsRefine = false;
+    this.onFrame?.(true);
   }
 }
 
 function disposeObject(root) {
+  const textures = new Set();
   root.traverse((o) => {
     if (!o.isMesh) return;
     o.geometry?.dispose();
     for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
       if (!m) continue;
-      for (const v of Object.values(m)) if (v && v.isTexture) v.dispose();
+      for (const v of Object.values(m)) if (v && v.isTexture) textures.add(v);
       m.dispose();
     }
+    if (o.isInstancedMesh) o.dispose();
   });
+  textures.forEach((t) => t.dispose());
 }

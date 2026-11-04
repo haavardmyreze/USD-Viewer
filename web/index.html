@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>USD Viewer</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 3 7v10l9 5 9-5V7z' fill='%235aa7ff'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
   <script type="importmap">
   {
@@ -15,97 +16,184 @@
   </script>
 </head>
 <body>
-  <canvas id="viewport"></canvas>
+  <canvas id="viewport" tabindex="0" aria-label="3D view"></canvas>
 
-  <aside id="panel">
-    <header>
-      <h1>USD Viewer</h1>
-      <button id="toggle-panel" class="icon" title="Hide panel (I)" aria-label="Hide panel">&minus;</button>
-    </header>
-
-    <div id="panel-body">
-      <section class="open">
-        <p class="hint">Drop a USD folder, <code>.zip</code>, <code>.usdz</code> or <code>.glb</code> anywhere.</p>
-        <div class="buttons">
-          <button id="open-folder">Open folder…</button>
-          <button id="open-files">Open files…</button>
-        </div>
-        <input id="folder-input" type="file" webkitdirectory multiple hidden>
-        <input id="files-input" type="file" multiple hidden
-               accept=".usd,.usda,.usdc,.usdz,.zip,.glb,.gltf">
-      </section>
-
-      <section id="path-section" hidden>
-        <label for="path-input">Open a path on this machine</label>
-        <form id="path-form" class="path-row">
-          <input id="path-input" type="text" spellcheck="false" autocomplete="off"
-                 placeholder="V:\project\sets\layout.usda">
-          <button type="submit">Open</button>
-        </form>
-        <p class="hint small">Reads files in place, so references like <code>../../assets</code> resolve
-          without uploading anything. A folder opens its root layer.</p>
-      </section>
-
-      <section id="missing-section" class="notice" hidden>
-        <strong>Some referenced files weren't included.</strong>
-        <span id="missing-text"></span>
-      </section>
-
-      <section id="status-section" hidden>
-        <div id="status"></div>
-        <progress id="progress" max="1" value="0" hidden></progress>
-      </section>
-
-      <section id="root-section" hidden>
-        <label for="root-select">Root layer</label>
-        <select id="root-select"></select>
-      </section>
-
-      <section id="info-section" hidden>
-        <dl id="stats"></dl>
-        <details id="unresolved-details" hidden>
-          <summary>Missing assets <span class="badge" id="unresolved-count"></span></summary>
-          <ul id="unresolved-list"></ul>
-        </details>
-        <details id="warnings-details" hidden>
-          <summary>Warnings <span class="badge" id="warnings-count"></span></summary>
-          <ul id="warnings-list"></ul>
-        </details>
-        <details id="layers-details" hidden>
-          <summary>Layers <span class="badge" id="layers-count"></span></summary>
-          <ul id="layers-list"></ul>
-        </details>
-      </section>
-
-      <section class="toggles">
-        <label><input type="checkbox" id="opt-grid"> Grid <kbd>G</kbd></label>
-        <label><input type="checkbox" id="opt-double"> Double-sided <kbd>B</kbd></label>
-        <label title="Show proxy-purpose geometry instead of render-purpose geometry (lighter, like a DCC viewport)">
-          <input type="checkbox" id="opt-proxy"> Proxy <kbd>P</kbd></label>
-      </section>
-
-      <section class="help">
-        <h2>Controls</h2>
-        <table>
-          <tr><td>Click</td><td>Capture mouse to look (Esc releases)</td></tr>
-          <tr><td>Right-drag</td><td>Look without capturing</td></tr>
-          <tr><td><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></td><td>Fly</td></tr>
-          <tr><td><kbd>E</kbd> / <kbd>Q</kbd></td><td>Up / down</td></tr>
-          <tr><td><kbd>Shift</kbd> / <kbd>Ctrl</kbd></td><td>Fast / slow</td></tr>
-          <tr><td>Scroll</td><td>Change fly speed</td></tr>
-          <tr><td><kbd>F</kbd></td><td>Frame whole scene</td></tr>
-        </table>
-      </section>
+  <!-- top bar (scene loaded) -->
+  <header id="topbar" hidden>
+    <div class="brand" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="m3 7 9 5 9-5M12 12v10" class="stroke"/></svg>
     </div>
+    <div class="title">
+      <span id="scene-name"></span>
+      <span id="scene-sub"></span>
+    </div>
+    <div class="tools">
+      <button id="btn-frame" class="tool" title="Frame scene (F)">
+        <svg viewBox="0 0 24 24"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/><circle cx="12" cy="12" r="2.5"/></svg>
+      </button>
+      <button id="btn-proxy" class="tool text" title="Show proxy geometry instead of render geometry (P)" aria-pressed="false">Proxy</button>
+      <button id="btn-inspector" class="tool" title="Inspector (I)" aria-pressed="true">
+        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>
+        <span id="issues-dot" class="dot" hidden></span>
+      </button>
+      <button id="btn-help" class="tool" title="Controls (?)">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.2-2.4 3.6M12 17h.01"/></svg>
+      </button>
+      <button id="btn-open" class="tool primary" title="Open another scene (O)">Open</button>
+    </div>
+  </header>
+
+  <!-- inspector -->
+  <aside id="inspector" hidden>
+    <section class="block" id="scene-block">
+      <h2>Scene</h2>
+      <p id="scene-path" class="mono path"></p>
+      <label id="root-field" class="field" hidden>
+        <span>Root layer</span>
+        <select id="root-select"></select>
+      </label>
+      <dl id="stats"></dl>
+    </section>
+
+    <section class="block" id="issues-block" hidden>
+      <h2>Issues <span class="count" id="issues-count"></span></h2>
+      <p id="missing-explain" class="explain" hidden></p>
+      <details id="missing-details" open>
+        <summary class="bad">Missing files <span class="count" id="missing-count"></span></summary>
+        <ul id="missing-list" class="mono"></ul>
+      </details>
+      <details id="warnings-details">
+        <summary class="warn">Warnings <span class="count" id="warnings-count"></span></summary>
+        <ul id="warnings-list"></ul>
+      </details>
+    </section>
+
+    <section class="block">
+      <h2>Display</h2>
+      <label class="switch"><input type="checkbox" id="opt-grid" checked><span>Grid</span><kbd>G</kbd></label>
+      <label class="switch"><input type="checkbox" id="opt-shadows" checked><span>Shadows</span><kbd>L</kbd></label>
+      <label class="switch"><input type="checkbox" id="opt-double"><span>Double-sided</span><kbd>B</kbd></label>
+      <label class="switch"><input type="checkbox" id="opt-proxy"><span>Proxy geometry</span><kbd>P</kbd></label>
+      <div class="field">
+        <span>Detail</span>
+        <div class="segmented" id="detail" role="radiogroup" aria-label="Detail">
+          <button data-value="fast" role="radio" title="Lower detail sooner, for heavy scenes">Fast</button>
+          <button data-value="balanced" role="radio">Balanced</button>
+          <button data-value="high" role="radio">High</button>
+          <button data-value="full" role="radio" title="Always full detail (slowest)">Full</button>
+        </div>
+      </div>
+      <div class="field">
+        <span>Exposure</span>
+        <input type="range" id="opt-exposure" min="-2" max="2" step="0.1" value="0">
+      </div>
+    </section>
+
+    <section class="block" id="layers-block">
+      <details id="layers-details">
+        <summary>Layers <span class="count" id="layers-count"></span></summary>
+        <ul id="layers-list" class="mono"></ul>
+      </details>
+    </section>
   </aside>
 
-  <div id="hud">
-    <span id="hud-speed"></span>
-    <span id="hud-pos"></span>
+  <!-- open screen / dialog -->
+  <div id="welcome" class="scrim">
+    <div class="card welcome-card" role="dialog" aria-labelledby="welcome-title">
+      <button id="welcome-close" class="icon-btn close" title="Close (Esc)" hidden>
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+      <div class="welcome-head">
+        <div class="brand big" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="m3 7 9 5 9-5M12 12v10" class="stroke"/></svg>
+        </div>
+        <div>
+          <h1 id="welcome-title">USD Viewer</h1>
+          <p class="lead">Open an OpenUSD scene and fly through it.</p>
+        </div>
+      </div>
+
+      <form id="path-form" class="path-form" hidden>
+        <label for="path-input">Open from this computer</label>
+        <div class="path-row">
+          <input id="path-input" type="text" spellcheck="false" autocomplete="off"
+                 placeholder="Paste a path, e.g. V:\project\sets\layout.usda">
+          <button type="submit" class="primary">Open</button>
+        </div>
+        <p class="hint">Reads files where they are, so references to other folders resolve. A folder opens its root layer.</p>
+      </form>
+
+      <div id="dropzone" class="dropzone">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4M7.5 8.5 12 4l4.5 4.5M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+        <div>
+          <strong>Drop a folder, .zip, .usdz or .glb</strong>
+          <span>Include everything the scene references.</span>
+        </div>
+        <div class="drop-buttons">
+          <button id="open-folder" type="button">Choose folder</button>
+          <button id="open-files" type="button">Choose files</button>
+        </div>
+      </div>
+      <input id="folder-input" type="file" webkitdirectory multiple hidden>
+      <input id="files-input" type="file" multiple hidden accept=".usd,.usda,.usdc,.usdz,.zip,.glb,.gltf">
+
+      <div id="recent-block" hidden>
+        <h2>Recent</h2>
+        <ul id="recent-list"></ul>
+      </div>
+    </div>
   </div>
 
-  <div id="click-hint" hidden>Click to look around · WASD to fly</div>
-  <div id="drop-overlay" hidden><div>Drop to load</div></div>
+  <!-- loading -->
+  <div id="loading" class="scrim light" hidden>
+    <div class="card loading-card" role="status" aria-live="polite">
+      <div class="spinner" aria-hidden="true"></div>
+      <div class="loading-text">
+        <strong id="loading-step"></strong>
+        <span id="loading-detail"></span>
+      </div>
+      <progress id="loading-progress" max="1"></progress>
+    </div>
+  </div>
+
+  <!-- help -->
+  <div id="help" class="scrim" hidden>
+    <div class="card help-card" role="dialog" aria-labelledby="help-title">
+      <button id="help-close" class="icon-btn close" title="Close (Esc)">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+      <h1 id="help-title">Controls</h1>
+      <div class="help-cols">
+        <table>
+          <tr><th colspan="2">Mouse</th></tr>
+          <tr><td>Left-drag</td><td>Orbit around the point under the cursor</td></tr>
+          <tr><td>Shift + left-drag · Middle-drag</td><td>Pan</td></tr>
+          <tr><td>Scroll</td><td>Zoom towards the cursor</td></tr>
+          <tr><td>Right-drag</td><td>Look around (fly mode)</td></tr>
+          <tr><td>Right-drag + scroll</td><td>Change fly speed</td></tr>
+          <tr><td>Double-click</td><td>Focus on a point</td></tr>
+        </table>
+        <table>
+          <tr><th colspan="2">Keyboard</th></tr>
+          <tr><td><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></td><td>Fly</td></tr>
+          <tr><td><kbd>E</kbd> / <kbd>Q</kbd></td><td>Up / down</td></tr>
+          <tr><td><kbd>Shift</kbd> / <kbd>Ctrl</kbd></td><td>Faster / slower</td></tr>
+          <tr><td><kbd>F</kbd></td><td>Frame scene</td></tr>
+          <tr><td><kbd>G</kbd> <kbd>L</kbd> <kbd>B</kbd> <kbd>P</kbd></td><td>Grid · shadows · double-sided · proxy</td></tr>
+          <tr><td><kbd>I</kbd> <kbd>O</kbd> <kbd>?</kbd></td><td>Inspector · open · this help</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="nav-hint" hidden>
+    <span><b>Drag</b> orbit</span><span><b>Scroll</b> zoom</span><span><b>Shift-drag</b> pan</span>
+    <span><b>Right-drag + WASD</b> fly</span><span><b>Double-click</b> focus</span>
+  </div>
+  <div id="hud" hidden><span id="hud-fps"></span><span id="hud-tris"></span><span id="hud-speed"></span></div>
+  <div id="pivot" hidden></div>
+  <div id="toast" role="alert" hidden><span id="toast-text"></span><button id="toast-close" class="icon-btn" title="Dismiss"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+  <div id="drop-overlay" hidden><div>Drop to open</div></div>
 
   <script type="module" src="js/main.js"></script>
 </body>

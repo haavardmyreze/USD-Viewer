@@ -29,7 +29,13 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, UsdUtils
 
 from .glb import GlbBuilder
 
-CONVERTER_VERSION = "2"
+CONVERTER_VERSION = "3"
+
+# Level of detail: meshes with at least this many triangles get simplified
+# versions (each ~1/4 of the previous) that the viewer switches to by screen size.
+LOD_ENABLED = os.environ.get("USDV_LODS", "1") not in ("0", "false", "no", "off")
+LOD_MIN_TRIANGLES = int(os.environ.get("USDV_LOD_MIN_TRIANGLES", "20000"))
+LOD_LEVELS = 3
 
 # textures larger than this (longest side, px) are downscaled; 0 disables
 MAX_TEXTURE_SIZE = int(os.environ.get("USDV_MAX_TEXTURE_SIZE", "2048"))
@@ -309,6 +315,9 @@ class _Converter:
         self.hidden_purposes = hidden
         self.predicate = Usd.TraverseInstanceProxies(Usd.PrimDefaultPredicate)
         self._active_protos: set[str] = set()
+        self.lods: dict[int, list[int]] = {}  # mesh index -> LOD mesh indices
+        self.lod_groups: list[str] = []
+        self.lod_nodes: list[int] = []
 
     # -- traversal ---------------------------------------------------------
 
@@ -432,7 +441,7 @@ class _Converter:
             m = mats[0]
             if not np.allclose(m, np.eye(4)):
                 node["matrix"] = [float(x) for x in m.reshape(-1)]
-            return [self.glb.add_node(node)]
+            return [self._add_with_lods(node)]
 
         self.stats["instances"] += n
         trs = _decompose_trs(mats)
@@ -440,7 +449,7 @@ class _Converter:
             # shear or mirroring: fall back to one node per instance
             nodes = []
             for i, m in enumerate(mats):
-                nodes.append(self.glb.add_node({
+                nodes.append(self._add_with_lods({
                     "name": f"{name}[{i}]", "mesh": mesh_index,
                     "matrix": [float(x) for x in m.reshape(-1)]}))
             return nodes
@@ -453,8 +462,24 @@ class _Converter:
         used = self.glb.gltf.setdefault("extensionsUsed", [])
         if "EXT_mesh_gpu_instancing" not in used:
             used.append("EXT_mesh_gpu_instancing")
-        return [self.glb.add_node({"name": name, "mesh": mesh_index,
-                                   "extensions": {"EXT_mesh_gpu_instancing": ext}})]
+        return [self._add_with_lods({"name": name, "mesh": mesh_index,
+                                     "extensions": {"EXT_mesh_gpu_instancing": ext}})]
+
+    def _add_with_lods(self, node: dict) -> int:
+        """Add a node; if its mesh has LODs, add one sibling node per level to the
+        LOD scene, sharing the transform / instance data. The viewer pairs them up
+        through extras.usdvLod = {group, level}."""
+        lods = self.lods.get(node["mesh"])
+        if not lods:
+            return self.glb.add_node(node)
+        group = len(self.lod_groups)
+        self.lod_groups.append(node["name"])
+        base = self.glb.add_node({**node, "extras": {"usdvLod": {"group": group, "level": 0}}})
+        for level, mesh in enumerate(lods, 1):
+            self.lod_nodes.append(self.glb.add_node({
+                **node, "name": f"{node['name']} (LOD{level})", "mesh": mesh,
+                "extras": {"usdvLod": {"group": group, "level": level}}}))
+        return base
 
     def run(self) -> tuple[bytes, dict]:
         stage = self.stage
@@ -474,6 +499,10 @@ class _Converter:
         if root_matrix != [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]:
             root["matrix"] = root_matrix
         self.glb.add_node(root, root=True)
+        if self.lod_nodes:
+            # a second glTF scene: other glTF viewers show only the default scene
+            lod_root = {**root, "name": "usd_stage_lods", "children": self.lod_nodes}
+            self.glb.add_scene("usdv_lods", [self.glb.add_node(lod_root)])
 
         for t, n in self.report.skipped_types.items():
             self.report.warn(f"{n} {t} prim(s) skipped (not supported yet)")
@@ -487,11 +516,14 @@ class _Converter:
                 "pointInstancers": self.stats["instancers"],
                 "instances": self.stats["instances"],
                 "meshPrims": self.stats["mesh_prims"],
-                "uniqueMeshes": len(self.glb.gltf["meshes"]),
+                "uniqueMeshes": len(self.glb.gltf["meshes"]) - sum(len(v) for v in self.lods.values()),
+                "lodMeshes": sum(len(v) for v in self.lods.values()),
                 "triangles": self.stats["triangles"],
                 "uniqueTriangles": self.stats["unique_triangles"],
                 "materials": len(self.glb.gltf["materials"]),
                 "textures": len(self.glb.gltf["images"]),
+                "lodGroups": len(self.lod_groups),
+                "lodTriangles": self.stats["lod_triangles"],
                 "cameras": self.stats["cameras"],
             },
             "warnings": self.report.as_list(),
@@ -656,6 +688,7 @@ class _Converter:
 
         n_tris = len(corners)
         primitives = []
+        lod_sources = []
         tri_group = face_group[face_of_tri]
         for g, key in enumerate(group_keys):
             sel = np.nonzero(tri_group == g)[0]
@@ -673,7 +706,90 @@ class _Converter:
                 "material": self._material_for_key(key),
                 "mode": 4,
             })
-        return self.glb.add_mesh(path, primitives), n_tris
+            lod_sources.append((welded, index_buf, primitives[-1]))
+        mesh_index = self.glb.add_mesh(path, primitives)
+        if LOD_ENABLED and n_tris >= LOD_MIN_TRIANGLES:
+            self.lods[mesh_index] = self._build_lods(path, lod_sources)
+        return mesh_index, n_tris
+
+    # -- level of detail ---------------------------------------------------
+
+    def _build_lods(self, path, sources) -> list[int]:
+        """Simplified versions of a mesh, each ~1/4 of the previous triangle count.
+
+        Normals are recomputed (smooth); UVs and vertex colours are carried over
+        from a source vertex that collapsed into each kept vertex.
+        """
+        try:
+            import fast_simplification as fs
+        except ImportError:  # pragma: no cover - optional dependency
+            self.report.warn("fast-simplification is not installed; no LODs generated")
+            return []
+
+        current = []
+        for attrs, index_buf, prim in sources:
+            pos = np.asarray(attrs["POSITION"], dtype=np.float64)
+            # weld by position only so seams (split normals / UVs) don't open as cracks
+            points, inv = np.unique(pos, axis=0, return_inverse=True)
+            inv = inv.reshape(-1)
+            extra = {}
+            for k in ("TEXCOORD_0", "COLOR_0"):
+                if k in attrs:
+                    v = np.zeros((len(points), attrs[k].shape[1]), dtype=np.float32)
+                    v[inv] = attrs[k]
+                    extra[k] = v
+            tris = inv[np.asarray(index_buf, dtype=np.int64).reshape(-1, 3)]
+            current.append({"points": points, "tris": tris, "extra": extra, "last": prim, "keep": False})
+
+        levels: list[int] = []
+        prev_total = sum(len(c["tris"]) for c in current)
+        for _ in range(LOD_LEVELS):
+            nxt = []
+            for c in current:
+                if len(c["tris"]) < 256:
+                    nxt.append({**c, "keep": True})  # too small to bother: reuse its last level
+                    continue
+                try:
+                    pts, faces, coll = fs.simplify(c["points"], c["tris"].astype(np.int64),
+                                                   target_reduction=0.75, return_collapses=True)
+                except Exception as exc:  # pragma: no cover - defensive
+                    self.report.warn(f"{path}: LOD generation failed ({exc})")
+                    return levels
+                extra = {}
+                if c["extra"]:
+                    _, _, mapping = fs.replay_simplification(
+                        c["points"].astype(np.float32), c["tris"].astype(np.int64), coll)
+                    if len(mapping) == len(c["points"]) and mapping.max(initial=-1) < len(pts):
+                        for k, v in c["extra"].items():
+                            out = np.zeros((len(pts), v.shape[1]), dtype=np.float32)
+                            out[mapping] = v
+                            extra[k] = out
+                nxt.append({"points": pts, "tris": np.asarray(faces, dtype=np.int64), "extra": extra,
+                            "last": c["last"], "keep": False})
+            total = sum(len(c["tris"]) for c in nxt)
+            if total == 0 or total > prev_total * 0.6:
+                break  # the mesh won't simplify further in a useful way
+            primitives = []
+            for c in nxt:
+                if c["keep"]:
+                    primitives.append(c["last"])
+                    continue
+                normals = _smooth_normals(c["points"], c["tris"])
+                attrs = {"POSITION": self.glb.add_attribute(c["points"]),
+                         "NORMAL": self.glb.add_attribute(normals)}
+                for k, v in c["extra"].items():
+                    attrs[k] = self.glb.add_attribute(v)
+                prim = {"attributes": attrs, "indices": self.glb.add_indices(c["tris"]),
+                        "material": c["last"]["material"], "mode": 4}
+                primitives.append(prim)
+                c["last"] = prim
+            levels.append(self.glb.add_mesh(f"{path} (LOD{len(levels) + 1})", primitives))
+            self.stats["lod_triangles"] += total
+            prev_total = total
+            current = nxt
+            if total < 2000:
+                break
+        return levels
 
     # -- materials ---------------------------------------------------------
 

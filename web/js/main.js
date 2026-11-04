@@ -1,30 +1,19 @@
+import * as THREE from 'three';
 import { Viewer } from './viewer.js';
 import {
   convertUpload, filesFromDrop, filesFromInput, getHealth, getUpload, isDirectGltf, openPath, uploadFiles,
 } from './upload.js';
 
 const $ = (id) => document.getElementById(id);
-
 const viewer = new Viewer($('viewport'));
-// source: 'upload' (files sent to the server) or 'path' (read in place on the server machine)
+
+// source: 'upload' (files sent to the server), 'path' (read in place) or 'file' (a dropped .glb)
 let current = { source: null, uploadId: null, path: null, root: null };
 let purpose = 'render';
 let localPaths = false;
 let busy = false;
 
-// -- status ------------------------------------------------------------------
-
-function setStatus(text, { error = false, progress = null } = {}) {
-  $('status-section').hidden = !text && progress === null;
-  $('status').textContent = text || '';
-  $('status').classList.toggle('error', error);
-  const bar = $('progress');
-  bar.hidden = progress === null;
-  if (progress !== null) {
-    if (progress < 0) bar.removeAttribute('value'); // indeterminate
-    else bar.value = progress;
-  }
-}
+// -- small helpers ---------------------------------------------------------------
 
 function fmtBytes(n) {
   if (n < 1024) return `${n} B`;
@@ -33,13 +22,24 @@ function fmtBytes(n) {
   return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
-const fmtInt = (n) => Math.round(n).toLocaleString();
+function fmtCount(n) {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(2)} B`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e8 ? 0 : 1)} M`;
+  if (n >= 1e4) return `${(n / 1e3).toFixed(0)} k`;
+  return Math.round(n).toLocaleString();
+}
 
-function fillList(detailsId, countId, listId, items) {
-  $(detailsId).hidden = !items || items.length === 0;
-  if (!items) return;
-  $(countId).textContent = items.length;
-  const ul = $(listId);
+const basename = (p) => (p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+const store = {
+  get(key, fallback) {
+    try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+  },
+  set(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode */ }
+  },
+};
+
+function list(ul, items) {
   ul.replaceChildren(...items.map((t) => {
     const li = document.createElement('li');
     li.textContent = t;
@@ -47,31 +47,131 @@ function fillList(detailsId, countId, listId, items) {
   }));
 }
 
-function showReport(report) {
-  const s = report ? report.stats : null;
-  const view = viewer.stats();
-  const rows = [];
-  if (report) {
-    rows.push(['Root', report.root]);
-    rows.push(['Layers', fmtInt(report.layers.length)]);
-    rows.push(['Geometry', report.purpose === 'proxy' ? 'proxy purpose' : 'render purpose']);
-    if (s.pointInstancers) {
-      rows.push(['Point instancers', fmtInt(s.pointInstancers)]);
-    }
-    rows.push(['Mesh instances', fmtInt(s.meshPrims)]);
-    rows.push(['Unique meshes', fmtInt(s.uniqueMeshes)]);
-    rows.push(['Triangles', fmtInt(s.triangles)]);
-    rows.push(['Materials', fmtInt(s.materials)]);
-    rows.push(['Textures', fmtInt(s.textures)]);
-    rows.push(['Up axis / units', `${report.upAxis} · ${report.metersPerUnit} m`]);
-    rows.push(['GLB size', fmtBytes(report.glbBytes)]);
-    rows.push(['Convert time', `${report.seconds.toFixed(2)} s`]);
-  } else {
-    rows.push(['Meshes', fmtInt(view.meshes)]);
-    rows.push(['Triangles', fmtInt(view.triangles)]);
-  }
-  rows.push(['Scene size', `${view.size.x.toFixed(1)} × ${view.size.y.toFixed(1)} × ${view.size.z.toFixed(1)} m`]);
+// -- status: loading card + toast -----------------------------------------------------
 
+function setLoading(step, { detail = '', progress = null } = {}) {
+  $('loading').hidden = false;
+  $('loading-step').textContent = step;
+  $('loading-detail').textContent = detail;
+  const bar = $('loading-progress');
+  if (progress === null) bar.removeAttribute('value');
+  else bar.value = progress;
+}
+
+const hideLoading = () => { $('loading').hidden = true; };
+
+let toastTimer = 0;
+function toast(message) {
+  $('toast-text').textContent = message;
+  $('toast').hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { $('toast').hidden = true; }, 12000);
+}
+$('toast-close').addEventListener('click', () => { $('toast').hidden = true; });
+
+// -- screens -----------------------------------------------------------------------------
+
+function showOpen() {
+  const hasScene = !!viewer.model;
+  $('welcome').hidden = false;
+  $('welcome').classList.toggle('modal', hasScene);
+  $('welcome-close').hidden = !hasScene;
+  renderRecent();
+  setTimeout(() => (localPaths ? $('path-input') : $('open-folder')).focus(), 0);
+}
+
+function hideOpen() {
+  if (!viewer.model) return; // nothing to go back to
+  $('welcome').hidden = true;
+  $('viewport').focus({ preventScroll: true });
+}
+
+function showSceneChrome() {
+  $('welcome').hidden = true;
+  $('topbar').hidden = false;
+  $('inspector').hidden = false;
+  $('hud').hidden = false;
+  if (!store.get('usdv.hintSeen', false)) $('nav-hint').hidden = false;
+}
+
+function setInspector(open) {
+  document.body.classList.toggle('no-inspector', !open);
+  $('btn-inspector').setAttribute('aria-pressed', String(open));
+  store.set('usdv.inspector', open);
+}
+
+// -- recent scenes --------------------------------------------------------------------
+
+function remember(entry) {
+  const key = (e) => (e.type === 'path' ? `p:${e.path}` : `u:${e.uploadId}:${e.root}`);
+  const items = store.get('usdv.recent', []).filter((e) => key(e) !== key(entry));
+  items.unshift({ ...entry, time: Date.now() });
+  store.set('usdv.recent', items.slice(0, 8));
+}
+
+function renderRecent() {
+  const items = store.get('usdv.recent', []).filter((e) => e.type === 'upload' || localPaths);
+  $('recent-block').hidden = items.length === 0;
+  $('recent-list').replaceChildren(...items.map((e) => {
+    const li = document.createElement('li');
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.innerHTML = e.type === 'path'
+      ? '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>'
+      : '<svg viewBox="0 0 24 24"><path d="M12 15V4M7.5 8.5 12 4l4.5 4.5M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = e.name;
+    const where = document.createElement('span');
+    where.className = 'where';
+    where.textContent = e.type === 'path' ? e.path : 'uploaded (kept on the server for a while)';
+    b.title = e.type === 'path' ? e.path : e.name;
+    b.append(name, where);
+    b.addEventListener('click', () => {
+      if (e.type === 'path') run(() => openPathAndLoad(e.path, e.root));
+      else run(() => restoreUpload(e.uploadId, e.root));
+    });
+    li.append(b);
+    return li;
+  }));
+}
+
+// -- report -> inspector ----------------------------------------------------------------
+
+function showReport(report) {
+  const s = report?.stats;
+  const view = viewer.stats();
+
+  const name = report ? basename(report.root) : current.path;
+  $('scene-name').textContent = name || 'Scene';
+  const sub = [];
+  if (report) {
+    sub.push(report.source === 'path' ? 'Opened in place' : 'Uploaded');
+    sub.push(report.purpose === 'proxy' ? 'proxy geometry' : 'render geometry');
+  } else {
+    sub.push('glTF file');
+  }
+  $('scene-sub').textContent = sub.join(' · ');
+  $('scene-path').textContent = report?.source === 'path' ? report.path : (report?.root || '');
+  $('scene-path').hidden = !$('scene-path').textContent;
+  document.title = `${name} · USD Viewer`;
+
+  const rows = [];
+  rows.push(['Triangles', fmtCount(view.fullTriangles || s?.triangles || 0)]);
+  if (s) {
+    if (s.instances) rows.push(['Instances', fmtCount(s.meshPrims)]);
+    else rows.push(['Mesh prims', fmtCount(s.meshPrims)]);
+    if (s.pointInstancers) rows.push(['Point instancers', fmtCount(s.pointInstancers)]);
+    rows.push(['Unique meshes', fmtCount(s.uniqueMeshes)]);
+    rows.push(['Materials · textures', `${s.materials} · ${s.textures}`]);
+  }
+  const size = view.size;
+  rows.push(['Size', `${size.x.toFixed(1)} × ${size.y.toFixed(1)} × ${size.z.toFixed(1)} m`]);
+  if (report) {
+    rows.push(['Up axis · units', `${report.upAxis} · ${report.metersPerUnit} m`]);
+    rows.push(['Layers', fmtCount(report.layers.length)]);
+    rows.push(['Converted', `${report.seconds.toFixed(1)} s · ${fmtBytes(report.glbBytes)}`]);
+  }
   $('stats').replaceChildren(...rows.flatMap(([k, v]) => {
     const dt = document.createElement('dt');
     dt.textContent = k;
@@ -80,45 +180,53 @@ function showReport(report) {
     dd.title = v;
     return [dt, dd];
   }));
-  $('info-section').hidden = false;
 
-  fillList('unresolved-details', 'unresolved-count', 'unresolved-list', report?.unresolved);
+  // issues
+  const missing = report?.unresolved || [];
   const warnings = report ? [...report.compositionErrors, ...report.warnings] : [];
-  fillList('warnings-details', 'warnings-count', 'warnings-list', warnings);
-  fillList('layers-details', 'layers-count', 'layers-list', report?.layers);
-  showMissingNotice(report);
-}
+  $('issues-block').hidden = missing.length + warnings.length === 0;
+  $('issues-count').textContent = missing.length + warnings.length;
+  $('missing-details').hidden = missing.length === 0;
+  $('missing-count').textContent = missing.length;
+  list($('missing-list'), missing);
+  $('warnings-details').hidden = warnings.length === 0;
+  $('warnings-count').textContent = warnings.length;
+  list($('warnings-list'), warnings);
+  $('warnings-details').open = missing.length === 0 && warnings.length <= 3;
+  $('issues-dot').hidden = missing.length + warnings.length === 0;
+  $('issues-dot').classList.toggle('bad', missing.length > 0);
 
-function showMissingNotice(report) {
-  const missing = report?.unresolved?.length || 0;
-  $('missing-section').hidden = missing === 0;
-  if (!missing) return;
-  const n = `${missing} file${missing === 1 ? '' : 's'}`;
-  if (report.source === 'upload') {
-    $('missing-text').textContent = `${n} referenced by the scene ${missing === 1 ? 'is' : 'are'} outside what was `
-      + 'dropped. The browser can only send what you give it, so drop the folder that contains everything '
-      + '(e.g. the project root)'
-      + (localPaths ? ", or paste the root layer's path above to read it in place." : '.');
+  const explain = $('missing-explain');
+  explain.hidden = missing.length === 0;
+  if (report?.source === 'upload') {
+    explain.textContent = 'These files are outside what was dropped. The browser can only send what you give it: '
+      + 'drop the folder that contains everything (e.g. the project root)'
+      + (localPaths ? ", or open the root layer's path to read it in place." : '.');
   } else {
-    $('missing-text').textContent = `${n} referenced by the scene could not be found on disk. `
-      + 'See Missing assets below.';
+    explain.textContent = 'These files are referenced by the scene but do not exist on disk.';
   }
+  if (missing.length && store.get('usdv.inspector', true) === false) setInspector(true);
+
+  const layers = report?.layers || [];
+  $('layers-block').hidden = layers.length === 0;
+  $('layers-count').textContent = layers.length;
+  list($('layers-list'), layers);
 }
 
-function showRoots(summary) {
-  const sel = $('root-select');
-  const options = summary.usdFiles.length > 1 ? summary.usdFiles : [];
-  $('root-section').hidden = options.length === 0;
-  const candidates = new Set(summary.rootCandidates);
-  sel.replaceChildren(...[...summary.rootCandidates, ...options.filter((o) => !candidates.has(o))].map((f) => {
+function showRoots(candidates, all, selected) {
+  const options = all.length > 1 ? all : [];
+  $('root-field').hidden = options.length === 0;
+  const set = new Set(candidates);
+  $('root-select').replaceChildren(...[...candidates, ...options.filter((o) => !set.has(o))].map((f) => {
     const o = document.createElement('option');
     o.value = f;
-    o.textContent = candidates.has(f) ? f : `${f}  (referenced by another layer)`;
+    o.textContent = set.has(f) ? f : `${f}  (referenced by another layer)`;
     return o;
   }));
+  if (selected) $('root-select').value = selected;
 }
 
-// -- loading -----------------------------------------------------------------
+// -- loading flows -------------------------------------------------------------------------
 
 function updateHash() {
   const params = new URLSearchParams();
@@ -135,50 +243,59 @@ function updateHash() {
 
 async function loadReport(report) {
   updateHash();
-  setStatus(`Loading ${fmtBytes(report.glbBytes)} …`, { progress: 0 });
-  await viewer.loadGlb(report.glbUrl, (p) => setStatus(`Loading ${fmtBytes(report.glbBytes)} …`, { progress: p }));
+  const label = basename(report.root);
+  setLoading(`Downloading ${label}`, { detail: fmtBytes(report.glbBytes), progress: 0 });
+  await viewer.loadGlb(report.glbUrl, (p) => setLoading(`Downloading ${label}`, {
+    detail: `${fmtBytes(report.glbBytes * p)} of ${fmtBytes(report.glbBytes)}`, progress: p,
+  }));
+  showSceneChrome();
   showReport(report);
-  setStatus('');
-  updateClickHint();
+  hideLoading();
 }
 
 async function convertAndLoad(uploadId, root) {
-  setStatus(`Converting ${root} …`, { progress: -1 });
+  setLoading(`Converting ${basename(root)}`, { detail: 'Composing the stage with OpenUSD…' });
   const report = await convertUpload(uploadId, root, purpose);
   current = { source: 'upload', uploadId, path: null, root: report.root };
-  $('root-select').value = report.root;
+  remember({ type: 'upload', uploadId, root: report.root, name: basename(report.root) });
   await loadReport(report);
+}
+
+async function restoreUpload(uploadId, root) {
+  setLoading('Opening upload');
+  const summary = await getUpload(uploadId);
+  showRoots(summary.rootCandidates, summary.usdFiles, root || summary.root);
+  await convertAndLoad(uploadId, root || summary.root);
 }
 
 async function openPathAndLoad(path, root = null) {
-  setStatus(`Converting ${root || path} …`, { progress: -1 });
+  setLoading(`Converting ${basename(root || path)}`, { detail: 'Composing the stage with OpenUSD…' });
   const report = await openPath(path, root, purpose);
   current = { source: 'path', uploadId: null, path, root: report.folder ? report.root : null };
-  if (report.folder) {
-    showRoots({ usdFiles: report.rootCandidates, rootCandidates: report.rootCandidates });
-    $('root-select').value = report.root;
-  } else {
-    $('root-section').hidden = true;
-  }
+  if (report.folder) showRoots(report.rootCandidates, report.rootCandidates, report.root);
+  else $('root-field').hidden = true;
   $('path-input').value = path;
+  remember({ type: 'path', path, root: current.root, name: basename(report.root) });
   await loadReport(report);
 }
 
-/** Convert the current scene again (e.g. after switching purpose). */
+/** Convert the current scene again (after switching purpose). */
 function reloadCurrent() {
   if (current.source === 'upload') return run(() => convertAndLoad(current.uploadId, current.root));
   if (current.source === 'path') return run(() => openPathAndLoad(current.path, current.root));
-  return undefined;
+  return null;
 }
 
 async function run(task) {
   if (busy) return;
   busy = true;
+  $('toast').hidden = true;
   try {
     await task();
   } catch (err) {
     console.error(err);
-    setStatus(err.message || String(err), { error: true });
+    hideLoading();
+    toast(err.message || String(err));
   } finally {
     busy = false;
   }
@@ -190,47 +307,104 @@ function openFiles(files) {
     if (isDirectGltf(files)) {
       const url = URL.createObjectURL(files[0].file);
       try {
-        setStatus(`Loading ${files[0].path} …`, { progress: -1 });
+        setLoading(`Loading ${files[0].path}`);
         await viewer.loadGlb(url);
       } finally {
         URL.revokeObjectURL(url);
       }
-      current = { source: null, uploadId: null, path: null, root: null };
-      $('root-section').hidden = true;
+      current = { source: 'file', uploadId: null, path: files[0].path, root: null };
+      $('root-field').hidden = true;
       updateHash();
+      showSceneChrome();
       showReport(null);
-      setStatus('');
-      updateClickHint();
+      hideLoading();
       return;
     }
-
     const total = files.reduce((n, f) => n + f.file.size, 0);
-    const label = `Uploading ${files.length} file${files.length === 1 ? '' : 's'} (${fmtBytes(total)})`;
-    setStatus(`${label} …`, { progress: 0 });
-    const summary = await uploadFiles(files, (p) => setStatus(`${label} …`, { progress: p }));
-    showRoots(summary);
+    const label = `Uploading ${files.length} file${files.length === 1 ? '' : 's'}`;
+    setLoading(label, { detail: fmtBytes(total), progress: 0 });
+    const summary = await uploadFiles(files, (p) => setLoading(label, {
+      detail: `${fmtBytes(total * p)} of ${fmtBytes(total)}`, progress: p,
+    }));
+    showRoots(summary.rootCandidates, summary.usdFiles, summary.root);
     await convertAndLoad(summary.uploadId, summary.root);
   });
 }
 
 async function restoreFromHash() {
   const params = new URLSearchParams(location.hash.slice(1));
-  purpose = params.get('purpose') === 'proxy' ? 'proxy' : 'render';
-  $('opt-proxy').checked = purpose === 'proxy';
+  setPurpose(params.get('purpose') === 'proxy' ? 'proxy' : 'render');
   const uploadId = params.get('upload');
   const path = params.get('path');
-  if (path) {
-    await run(() => openPathAndLoad(path, params.get('root')));
-  } else if (uploadId) {
-    await run(async () => {
-      const summary = await getUpload(uploadId);
-      showRoots(summary);
-      await convertAndLoad(uploadId, params.get('root') || summary.root);
-    });
-  }
+  if (path) await run(() => openPathAndLoad(path, params.get('root')));
+  else if (uploadId) await run(() => restoreUpload(uploadId, params.get('root')));
 }
 
-// -- UI wiring -----------------------------------------------------------------
+// -- settings ---------------------------------------------------------------------------------
+
+function setPurpose(value) {
+  purpose = value;
+  $('opt-proxy').checked = value === 'proxy';
+  $('btn-proxy').setAttribute('aria-pressed', String(value === 'proxy'));
+}
+
+function togglePurpose() {
+  if (busy) return;
+  setPurpose(purpose === 'proxy' ? 'render' : 'proxy');
+  if (!reloadCurrent()) updateHash();
+}
+
+const settings = store.get('usdv.settings', {});
+function saveSetting(key, value) {
+  settings[key] = value;
+  store.set('usdv.settings', settings);
+}
+
+function bindSwitch(id, key, apply) {
+  const input = $(id);
+  if (key in settings) input.checked = settings[key];
+  apply(input.checked);
+  input.addEventListener('change', () => {
+    apply(input.checked);
+    saveSetting(key, input.checked);
+  });
+}
+
+bindSwitch('opt-grid', 'grid', (on) => viewer.setGrid(on));
+bindSwitch('opt-shadows', 'shadows', (on) => viewer.setShadows(on));
+bindSwitch('opt-double', 'doubleSided', (on) => viewer.setDoubleSided(on));
+$('opt-proxy').addEventListener('change', () => {
+  $('opt-proxy').checked = purpose === 'proxy'; // togglePurpose decides
+  togglePurpose();
+});
+
+function setDetail(value) {
+  viewer.setDetail(value);
+  for (const b of $('detail').querySelectorAll('button')) {
+    b.setAttribute('aria-checked', String(b.dataset.value === value));
+  }
+  saveSetting('detail', value);
+}
+$('detail').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (b) setDetail(b.dataset.value);
+});
+setDetail(settings.detail || 'balanced');
+
+$('opt-exposure').value = settings.exposure ?? 0;
+viewer.setExposure(2 ** Number($('opt-exposure').value));
+$('opt-exposure').addEventListener('input', (e) => {
+  viewer.setExposure(2 ** Number(e.target.value));
+  saveSetting('exposure', Number(e.target.value));
+});
+$('opt-exposure').addEventListener('dblclick', (e) => {
+  e.target.value = 0;
+  e.target.dispatchEvent(new Event('input'));
+});
+
+setInspector(store.get('usdv.inspector', true));
+
+// -- wiring -------------------------------------------------------------------------------------
 
 $('open-folder').addEventListener('click', () => $('folder-input').click());
 $('open-files').addEventListener('click', () => $('files-input').click());
@@ -241,95 +415,145 @@ for (const id of ['folder-input', 'files-input']) {
   });
 }
 
+$('path-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const path = $('path-input').value.trim().replace(/^"(.*)"$/, '$1');
+  if (path) run(() => openPathAndLoad(path));
+});
+
 $('root-select').addEventListener('change', (e) => {
   if (current.source === 'upload') run(() => convertAndLoad(current.uploadId, e.target.value));
   else if (current.source === 'path') run(() => openPathAndLoad(current.path, e.target.value));
 });
 
-$('path-form').addEventListener('submit', (e) => {
-  e.preventDefault();
-  const path = $('path-input').value.trim().replace(/^"(.*)"$/, '$1');
-  if (path) run(() => openPathAndLoad(path));
-  $('path-input').blur();
-});
+$('btn-open').addEventListener('click', showOpen);
+$('welcome-close').addEventListener('click', hideOpen);
+$('welcome').addEventListener('pointerdown', (e) => { if (e.target === $('welcome')) hideOpen(); });
+$('btn-frame').addEventListener('click', () => viewer.frameScene());
+$('btn-proxy').addEventListener('click', togglePurpose);
+$('btn-inspector').addEventListener('click', () => setInspector(document.body.classList.contains('no-inspector')));
+$('btn-help').addEventListener('click', () => { $('help').hidden = false; });
+$('help-close').addEventListener('click', () => { $('help').hidden = true; });
+$('help').addEventListener('pointerdown', (e) => { if (e.target === $('help')) $('help').hidden = true; });
 
-$('opt-proxy').addEventListener('change', (e) => {
-  if (busy) {
-    e.target.checked = purpose === 'proxy';
-    return;
-  }
-  purpose = e.target.checked ? 'proxy' : 'render';
-  if (!reloadCurrent()) updateHash();
-});
-
-$('toggle-panel').addEventListener('click', togglePanel);
-function togglePanel() {
-  const collapsed = $('panel').classList.toggle('collapsed');
-  $('toggle-panel').innerHTML = collapsed ? '+' : '&minus;';
+function isTyping(e) {
+  const t = e.target;
+  return t.isContentEditable || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT'
+    || (t.tagName === 'INPUT' && !['checkbox', 'range', 'button'].includes(t.type));
 }
 
-$('opt-grid').addEventListener('change', (e) => viewer.setGrid(e.target.checked));
-$('opt-double').addEventListener('change', (e) => viewer.setDoubleSided(e.target.checked));
-
 window.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox') return;
-  if (e.target.tagName === 'SELECT' || e.ctrlKey || e.metaKey) return;
+  if (e.key === 'Escape') {
+    if (!$('help').hidden) $('help').hidden = true;
+    else if (!$('welcome').hidden) hideOpen();
+    return;
+  }
+  if (isTyping(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (!$('welcome').hidden && !viewer.model) return;
+  const click = (id) => $(id).click();
   switch (e.code) {
     case 'KeyF': viewer.frameScene(); break;
-    case 'KeyG': $('opt-grid').click(); break;
-    case 'KeyB': $('opt-double').click(); break;
-    case 'KeyI': togglePanel(); break;
-    case 'KeyP': $('opt-proxy').click(); break;
+    case 'KeyG': click('opt-grid'); break;
+    case 'KeyL': click('opt-shadows'); break;
+    case 'KeyB': click('opt-double'); break;
+    case 'KeyP': togglePurpose(); break;
+    case 'KeyI': click('btn-inspector'); break;
+    case 'KeyO': showOpen(); break;
+    case 'Slash': case 'F1': $('help').hidden = !$('help').hidden; break;
     default: return;
   }
-  // keep focus off the toggled checkbox so Space doesn't re-toggle it
-  e.target.blur?.();
+  e.preventDefault();
+  if (e.target !== $('viewport')) e.target.blur?.();
 });
 
 // drag & drop anywhere
 let dragDepth = 0;
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
 window.addEventListener('dragenter', (e) => {
+  if (!hasFiles(e)) return;
   e.preventDefault();
   dragDepth += 1;
-  $('drop-overlay').hidden = false;
+  document.body.classList.add('drag-over');
+  if ($('welcome').hidden) $('drop-overlay').hidden = false;
 });
 window.addEventListener('dragleave', () => {
   dragDepth = Math.max(0, dragDepth - 1);
-  if (dragDepth === 0) $('drop-overlay').hidden = true;
+  if (dragDepth === 0) {
+    $('drop-overlay').hidden = true;
+    document.body.classList.remove('drag-over');
+  }
 });
 window.addEventListener('dragover', (e) => e.preventDefault());
 window.addEventListener('drop', async (e) => {
   e.preventDefault();
   dragDepth = 0;
   $('drop-overlay').hidden = true;
+  document.body.classList.remove('drag-over');
   openFiles(await filesFromDrop(e.dataTransfer));
 });
 
-// HUD
-function updateClickHint() {
-  $('click-hint').hidden = !viewer.model || viewer.controls.locked;
-}
-viewer.controls.addEventListener('lockchange', updateClickHint);
+// navigation feedback: cursor, pivot marker, first-use hint
+const nav = viewer.nav;
+let dragMode = null;
+nav.addEventListener('dragstart', (e) => {
+  dragMode = e.detail.mode;
+  document.body.classList.add(`dragging-${dragMode}`);
+});
+nav.addEventListener('dragend', (e) => {
+  document.body.classList.remove(`dragging-${e.detail.mode}`);
+  dragMode = null;
+  $('pivot').hidden = true;
+});
+let interactions = 0;
+nav.addEventListener('interact', () => {
+  interactions += 1;
+  if (interactions === 6 && !$('nav-hint').hidden) {
+    $('nav-hint').classList.add('fade');
+    setTimeout(() => { $('nav-hint').hidden = true; }, 700);
+    store.set('usdv.hintSeen', true);
+  }
+});
 
-const hudSpeed = $('hud-speed');
-const hudPos = $('hud-pos');
+// HUD
+const pivotScreen = new THREE.Vector3();
 let lastHud = 0;
-viewer.onFrame = () => {
+let frames = 0;
+let fpsWindowStart = performance.now();
+let fps = 0;
+viewer.onFrame = (rendered) => {
   const now = performance.now();
-  if (now - lastHud < 100) return;
+  if (rendered) frames += 1;
+  if (now - fpsWindowStart > 500) {
+    fps = (frames * 1000) / (now - fpsWindowStart);
+    frames = 0;
+    fpsWindowStart = now;
+  }
+  if (dragMode === 'orbit') {
+    pivotScreen.copy(nav.pivot).project(viewer.camera);
+    const visible = pivotScreen.z < 1;
+    $('pivot').hidden = !visible;
+    if (visible) {
+      $('pivot').style.left = `${((pivotScreen.x + 1) / 2) * window.innerWidth}px`;
+      $('pivot').style.top = `${((1 - pivotScreen.y) / 2) * window.innerHeight}px`;
+    }
+  }
+  if (now - lastHud < 250 || !viewer.model) return;
   lastHud = now;
-  const p = viewer.camera.position;
-  hudSpeed.textContent = `speed ${viewer.controls.speed.toPrecision(3)} m/s`;
-  hudPos.textContent = `${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}`;
+  const s = viewer.stats();
+  $('hud-fps').textContent = fps >= 3 ? `${Math.round(fps)} fps` : 'still';
+  $('hud-tris').textContent = `${fmtCount(s.drawnTriangles)} tris drawn`;
+  $('hud-speed').textContent = nav.isFlying ? `fly ${nav.speed.toPrecision(2)} m/s` : '';
 };
 
-// debugging handle
-window.usdViewer = viewer;
+// -- start ----------------------------------------------------------------------------------------
 
-// a pasted #path=… / #upload=… link (replaceState from this page doesn't fire this)
 window.addEventListener('hashchange', restoreFromHash);
-
 getHealth().then((h) => {
   localPaths = !!h.localPaths;
-  $('path-section').hidden = !localPaths;
-}).finally(restoreFromHash);
+  $('path-form').hidden = !localPaths;
+}).finally(async () => {
+  showOpen();
+  await restoreFromHash();
+});
+
+window.usdViewer = viewer; // debugging handle
