@@ -1,0 +1,6 @@
+.venv
+.git
+data
+sample_scene
+**/__pycache__
+.pytest_cache

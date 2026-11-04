@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>USD Viewer</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./vendor/three/build/three.module.min.js",
+      "three/addons/": "./vendor/three/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <canvas id="viewport"></canvas>
+
+  <aside id="panel">
+    <header>
+      <h1>USD Viewer</h1>
+      <button id="toggle-panel" class="icon" title="Hide panel (I)" aria-label="Hide panel">&minus;</button>
+    </header>
+
+    <div id="panel-body">
+      <section class="open">
+        <p class="hint">Drop a USD folder, <code>.zip</code>, <code>.usdz</code> or <code>.glb</code> anywhere.</p>
+        <div class="buttons">
+          <button id="open-folder">Open folder…</button>
+          <button id="open-files">Open files…</button>
+        </div>
+        <input id="folder-input" type="file" webkitdirectory multiple hidden>
+        <input id="files-input" type="file" multiple hidden
+               accept=".usd,.usda,.usdc,.usdz,.zip,.glb,.gltf">
+      </section>
+
+      <section id="status-section" hidden>
+        <div id="status"></div>
+        <progress id="progress" max="1" value="0" hidden></progress>
+      </section>
+
+      <section id="root-section" hidden>
+        <label for="root-select">Root layer</label>
+        <select id="root-select"></select>
+      </section>
+
+      <section id="info-section" hidden>
+        <dl id="stats"></dl>
+        <details id="unresolved-details" hidden>
+          <summary>Missing assets <span class="badge" id="unresolved-count"></span></summary>
+          <ul id="unresolved-list"></ul>
+        </details>
+        <details id="warnings-details" hidden>
+          <summary>Warnings <span class="badge" id="warnings-count"></span></summary>
+          <ul id="warnings-list"></ul>
+        </details>
+        <details id="layers-details" hidden>
+          <summary>Layers <span class="badge" id="layers-count"></span></summary>
+          <ul id="layers-list"></ul>
+        </details>
+      </section>
+
+      <section class="toggles">
+        <label><input type="checkbox" id="opt-grid"> Grid <kbd>G</kbd></label>
+        <label><input type="checkbox" id="opt-double"> Double-sided <kbd>B</kbd></label>
+      </section>
+
+      <section class="help">
+        <h2>Controls</h2>
+        <table>
+          <tr><td>Click</td><td>Capture mouse to look (Esc releases)</td></tr>
+          <tr><td>Right-drag</td><td>Look without capturing</td></tr>
+          <tr><td><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></td><td>Fly</td></tr>
+          <tr><td><kbd>E</kbd> / <kbd>Q</kbd></td><td>Up / down</td></tr>
+          <tr><td><kbd>Shift</kbd> / <kbd>Ctrl</kbd></td><td>Fast / slow</td></tr>
+          <tr><td>Scroll</td><td>Change fly speed</td></tr>
+          <tr><td><kbd>F</kbd></td><td>Frame whole scene</td></tr>
+        </table>
+      </section>
+    </div>
+  </aside>
+
+  <div id="hud">
+    <span id="hud-speed"></span>
+    <span id="hud-pos"></span>
+  </div>
+
+  <div id="click-hint" hidden>Click to look around · WASD to fly</div>
+  <div id="drop-overlay" hidden><div>Drop to load</div></div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
