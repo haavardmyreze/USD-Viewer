@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="100%"
+   height="100%"
+   viewBox="0 0 16 16"
+   version="1.1"
+   xml:space="preserve"
+   style="fill-rule:evenodd;clip-rule:evenodd;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:22;"
+   id="svg66714"
+   sodipodi:docname="primtype_physics.svg"
+   inkscape:version="1.2.1 (9c6d41e, 2022-07-14)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"><defs
+   id="defs66718" /><sodipodi:namedview
+   id="namedview66716"
+   pagecolor="#ffffff"
+   bordercolor="#000000"
+   borderopacity="0.25"
+   inkscape:showpageshadow="2"
+   inkscape:pageopacity="0.0"
+   inkscape:pagecheckerboard="0"
+   inkscape:deskcolor="#d1d1d1"
+   showgrid="false"
+   inkscape:zoom="64.1875"
+   inkscape:cx="8"
+   inkscape:cy="7.9922103"
+   inkscape:window-width="2560"
+   inkscape:window-height="1367"
+   inkscape:window-x="0"
+   inkscape:window-y="42"
+   inkscape:window-maximized="1"
+   inkscape:current-layer="svg66714" />
+    <g
+   id="primtype_physics"
+   transform="translate(-0.04699824,0.18400002)">
+        <path
+   d="M 1.867,11.384 C 1.039,9.95 3.136,7.187 6.546,5.217 9.957,3.248 13.398,2.814 14.227,4.249 c 0.828,1.434 -1.269,4.197 -4.68,6.166 -3.41,1.97 -6.852,2.404 -7.68,0.969 z"
+   style="fill:none;stroke:#dbf5a7;stroke-width:0.5px"
+   id="path66705" />
+        <ellipse
+   cx="8.0469999"
+   cy="7.816"
+   rx="3.0009999"
+   ry="7.1360002"
+   style="fill:none;stroke:#d2f391;stroke-width:0.5px"
+   id="ellipse66707" />
+        <path
+   d="m 1.867,4.249 c 0.828,-1.435 4.27,-1.001 7.68,0.968 3.411,1.97 5.508,4.733 4.68,6.167 -0.829,1.435 -4.27,1.001 -7.681,-0.969 C 3.136,8.446 1.039,5.683 1.867,4.249 Z"
+   style="fill:none;stroke:#baec56;stroke-width:0.5px"
+   id="path66709" />
+        <circle
+   cx="8.0469999"
+   cy="7.816"
+   r="1.253"
+   style="fill:#f5fce7;stroke:#a9e72c;stroke-width:0.5px"
+   id="circle66711" />
+    </g>
+</svg>

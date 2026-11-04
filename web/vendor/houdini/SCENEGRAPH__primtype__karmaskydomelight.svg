@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="100%"
+   height="100%"
+   viewBox="0 0 16 16"
+   version="1.1"
+   xml:space="preserve"
+   style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"
+   id="svg7682"
+   sodipodi:docname="primtype_karmaskydomelight.svg"
+   inkscape:version="1.2.1 (9c6d41e, 2022-07-14)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"><defs
+   id="defs7686" /><sodipodi:namedview
+   id="namedview7684"
+   pagecolor="#ffffff"
+   bordercolor="#000000"
+   borderopacity="0.25"
+   inkscape:showpageshadow="2"
+   inkscape:pageopacity="0.0"
+   inkscape:pagecheckerboard="0"
+   inkscape:deskcolor="#d1d1d1"
+   showgrid="false"
+   inkscape:zoom="64.1875"
+   inkscape:cx="8"
+   inkscape:cy="7.9922103"
+   inkscape:window-width="2560"
+   inkscape:window-height="1367"
+   inkscape:window-x="0"
+   inkscape:window-y="42"
+   inkscape:window-maximized="1"
+   inkscape:current-layer="svg7682" />
+    <g
+   id="primtype_karmaskydomelight"
+   transform="translate(-0.047,0.10764153)">
+        <path
+   d="m 0.047,10.816 c 0,0 0.325,-10 8,-10 7.675,0 8,10 8,10 l -8,2 z"
+   style="fill:#2273ff"
+   id="path7667" />
+        <path
+   d="m 13.648,3.557 c 2.259,2.961 2.399,7.259 2.399,7.259 l -8,2 -8,-2 c 0,0 0.14,-4.298 2.399,-7.259 1.732,-0.303 3.623,-0.469 5.601,-0.469 1.978,0 3.868,0.166 5.601,0.469 z"
+   style="fill:#5392ff"
+   id="path7669" />
+        <path
+   d="m 15.064,6.165 c 0.909,2.379 0.983,4.651 0.983,4.651 l -8,2 -8,-2 c 0,0 0.074,-2.272 0.983,-4.651 2.009,-0.587 4.422,-0.929 7.017,-0.929 2.595,0 5.008,0.342 7.017,0.929 z"
+   style="fill:#7cacff"
+   id="path7671" />
+        <path
+   d="m 15.67,8.185 c 0.34,1.501 0.377,2.631 0.377,2.631 l -8,2 -8,-2 c 0,0 0.037,-1.13 0.377,-2.631 1.961,-0.846 4.654,-1.369 7.623,-1.369 2.969,0 5.662,0.523 7.623,1.369 z"
+   style="fill:#e5efff"
+   id="path7673" />
+        <path
+   d="m 0.047,10.816 c 0,0 0.325,-10 8,-10 7.675,0 8,10 8,10 l -8,2 z m 1.068,-0.763 6.932,1.733 c 0,0 6.932,-1.733 6.932,-1.734 C 14.876,9.174 14.621,7.688 14.002,6.201 13.097,4.027 11.384,1.816 8.047,1.816 4.71,1.816 2.997,4.027 2.092,6.201 1.473,7.688 1.218,9.174 1.115,10.053 Z"
+   style="fill:#ffa600"
+   id="path7675" />
+        <ellipse
+   cx="8.0469999"
+   cy="11.316"
+   rx="8"
+   ry="3.5"
+   style="fill:#fff2d5"
+   id="ellipse7677" />
+        <path
+   d="m 8.047,7.816 c 4.415,0 8,1.569 8,3.5 0,1.932 -3.585,3.5 -8,3.5 -4.415,0 -8,-1.568 -8,-3.5 0,-1.931 3.585,-3.5 8,-3.5 z m 0,1 c -2.437,0 -4.604,0.493 -5.943,1.293 -0.604,0.36 -1.057,0.727 -1.057,1.207 0,0.481 0.453,0.848 1.057,1.208 1.339,0.799 3.506,1.292 5.943,1.292 2.436,0 4.604,-0.493 5.943,-1.292 0.604,-0.36 1.057,-0.727 1.057,-1.208 0,-0.48 -0.453,-0.847 -1.057,-1.207 -1.339,-0.8 -3.507,-1.293 -5.943,-1.293 z"
+   style="fill:#ffa600"
+   id="path7679" />
+    </g>
+</svg>

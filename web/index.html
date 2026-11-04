@@ -27,8 +27,12 @@
       <span id="scene-name"></span>
       <span id="scene-sub"></span>
     </div>
+    <div id="variants" class="variants" hidden></div>
     <div class="tools">
-      <button id="btn-frame" class="tool" title="Frame scene (F)">
+      <button id="btn-graph" class="tool" title="Scene graph (T)" aria-pressed="false">
+        <svg viewBox="0 0 24 24"><rect x="3" y="3.5" width="6" height="5" rx="1.2"/><rect x="13" y="9.5" width="8" height="5" rx="1.2"/><rect x="13" y="16" width="8" height="5" rx="1.2"/><path d="M6 8.5v9.5h7M6 12h7"/></svg>
+      </button>
+      <button id="btn-frame" class="tool" title="Frame selection or scene (F)">
         <svg viewBox="0 0 24 24"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/><circle cx="12" cy="12" r="2.5"/></svg>
       </button>
       <button id="btn-proxy" class="tool text" title="Show proxy geometry instead of render geometry (P)" aria-pressed="false">Proxy</button>
@@ -42,6 +46,17 @@
       <button id="btn-open" class="tool primary" title="Open another scene (O)">Open</button>
     </div>
   </header>
+
+  <!-- scene graph (usd-refgraph's scene tree) -->
+  <aside id="graph" hidden aria-label="Scene graph">
+    <div class="graph__head">
+      <h2>Scene graph</h2>
+      <button id="graph-close" class="iconbtn" type="button" title="Close (T)" aria-label="Close scene graph">
+        <svg class="rg-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"/></svg>
+      </button>
+    </div>
+    <div id="graph-body" class="graph__body"></div>
+  </aside>
 
   <!-- inspector -->
   <aside id="inspector" hidden>
@@ -172,13 +187,16 @@
           <tr><td>Right-drag</td><td>Look around (fly mode)</td></tr>
           <tr><td>Right-drag + scroll</td><td>Change fly speed</td></tr>
           <tr><td>Double-click</td><td>Focus on a point</td></tr>
+          <tr><td>Click</td><td>Select the prim under the cursor</td></tr>
         </table>
         <table>
           <tr><th colspan="2">Keyboard</th></tr>
           <tr><td><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></td><td>Fly</td></tr>
           <tr><td><kbd>E</kbd> / <kbd>Q</kbd></td><td>Up / down</td></tr>
           <tr><td><kbd>Shift</kbd> / <kbd>Ctrl</kbd></td><td>Faster / slower</td></tr>
-          <tr><td><kbd>F</kbd></td><td>Frame scene</td></tr>
+          <tr><td><kbd>F</kbd></td><td>Frame selection (or the scene)</td></tr>
+          <tr><td><kbd>T</kbd> <kbd>Esc</kbd></td><td>Scene graph · clear selection</td></tr>
+          <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>Previous / next variant</td></tr>
           <tr><td><kbd>G</kbd> <kbd>L</kbd> <kbd>B</kbd> <kbd>P</kbd></td><td>Grid · shadows · double-sided · proxy</td></tr>
           <tr><td><kbd>I</kbd> <kbd>O</kbd> <kbd>?</kbd></td><td>Inspector · open · this help</td></tr>
         </table>

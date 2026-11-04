@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="100%" height="100%" viewBox="0 0 16 16" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:22;">
+    <g id="primtype_nurbscurve">
+        <path d="M2.047,14.197c-0,-0 -0.893,-10.692 3.051,-10.692c3.785,0 2.022,9.561 5.807,9.561c3.784,0 3.142,-11.25 3.142,-11.25" style="fill:none;stroke:rgb(76,101,130);stroke-width:0.95px;"/>
+        <circle cx="5.047" cy="3.384" r="1" style="fill:rgb(149,164,181);"/>
+        <circle cx="14.088" cy="1.816" r="1" style="fill:rgb(149,164,181);"/>
+        <circle cx="1.96" cy="13.816" r="1" style="fill:rgb(149,164,181);"/>
+        <circle cx="11.047" cy="13.197" r="1" style="fill:rgb(149,164,181);"/>
+    </g>
+</svg>

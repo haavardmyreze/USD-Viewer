@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="100%"
+   height="100%"
+   viewBox="0 0 16 16"
+   version="1.1"
+   xml:space="preserve"
+   style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"
+   id="svg7"
+   sodipodi:docname="primtype_sphere.svg"
+   inkscape:version="1.2.1 (9c6d41e, 2022-07-14)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"><defs
+   id="defs11" /><sodipodi:namedview
+   id="namedview9"
+   pagecolor="#ffffff"
+   bordercolor="#000000"
+   borderopacity="0.25"
+   inkscape:showpageshadow="2"
+   inkscape:pageopacity="0.0"
+   inkscape:pagecheckerboard="0"
+   inkscape:deskcolor="#d1d1d1"
+   showgrid="false"
+   inkscape:zoom="64.1875"
+   inkscape:cx="8"
+   inkscape:cy="7.9922103"
+   inkscape:window-width="2560"
+   inkscape:window-height="1367"
+   inkscape:window-x="0"
+   inkscape:window-y="42"
+   inkscape:window-maximized="1"
+   inkscape:current-layer="svg7" />
+    <g
+   id="primtype_sphere"
+   transform="translate(0.13700008,0.27299976)">
+        <circle
+   cx="7.8629999"
+   cy="7.7270002"
+   r="8"
+   style="fill:#4c6582"
+   id="circle2" />
+        <path
+   d="m 10.147,1.341 c 2.743,1.678 3.401,5.604 1.469,8.761 C 9.685,13.259 5.889,14.459 3.146,12.78 0.404,11.102 -0.255,7.176 1.677,4.019 3.608,0.863 7.404,-0.338 10.147,1.341 Z"
+   style="fill:#a0adbd"
+   id="path4" />
+    </g>
+</svg>

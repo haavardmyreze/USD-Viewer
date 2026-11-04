@@ -26,6 +26,8 @@ function triangleCount(mesh) {
 export class LodManager {
   constructor() {
     this.groups = [];
+    /** Managed mesh -> { group, level }. */
+    this.groupOf = new Map();
     /** Screen-height fraction below which LOD1 is used; each further level halves it. */
     this.threshold = 0.45;
     this.stats = { triangles: 0, visible: 0, culled: 0, total: 0 };
@@ -34,6 +36,7 @@ export class LodManager {
   /** Find LOD groups (and plain instanced meshes) under `root`. */
   setup(root) {
     this.groups = [];
+    this.groupOf = new Map();
     root.updateMatrixWorld(true);
     const byId = new Map();
     const grouped = new Set();
@@ -88,7 +91,7 @@ export class LodManager {
       }
     }
 
-    this.groups.push({
+    const group = {
       levels,
       instanced,
       count,
@@ -98,7 +101,19 @@ export class LodManager {
       spheres,
       assigned: new Int8Array(count).fill(-2), // -2 = never assigned, -1 = culled
       tris: levels.map((meshes) => meshes.reduce((n, m) => n + triangleCount(m), 0)),
-    });
+      // slots[level][slot] = original instance index drawn in that slot
+      slots: levels.map(() => new Int32Array(Math.max(count, 1))),
+      version: 0, // bumped whenever the packing changes
+    };
+    this.groups.push(group);
+    levels.forEach((meshes, level) => meshes.forEach((m) => this.groupOf.set(m, { group, level })));
+  }
+
+  /** Original instance index drawn in `slot` of a managed mesh. */
+  instanceInSlot(mesh, slot) {
+    const entry = this.groupOf.get(mesh);
+    if (!entry || !entry.group.instanced) return slot;
+    return entry.group.slots[entry.level][slot] ?? slot;
   }
 
   /** World-space bounds of everything managed (all instances, ignoring culling). */
@@ -127,11 +142,13 @@ export class LodManager {
           if (g.instanced) {
             m.instanceMatrix.array.set(g.matrices.subarray(0, 16), 0);
             m.count = 1;
+            g.slots[g.levels.indexOf(meshes)][0] = 0;
             m.instanceMatrix.needsUpdate = true;
           }
         }
       }
       g.assigned.fill(-2);
+      g.version += 1;
     }
   }
 
@@ -186,6 +203,7 @@ export class LodManager {
         }
         if (g.instanced) {
           const slot = counts[level];
+          g.slots[level][slot] = i;
           for (const m of g.levels[level]) {
             m.instanceMatrix.array.set(g.matrices.subarray(i * 16, i * 16 + 16), slot * 16);
           }
@@ -195,6 +213,7 @@ export class LodManager {
         stats.triangles += g.tris[level];
       }
       stats.total += g.count;
+      if (changed) g.version += 1;
       for (let l = 0; l < nLevels; l++) {
         for (const m of g.levels[l]) {
           m.visible = counts[l] > 0;

@@ -25,7 +25,26 @@ def test_triangulate_mixed_polygons():
 
 
 def test_root_detection(scene_dir):
-    assert find_root_candidates(scene_dir) == ["shot.usda"]
+    # assemblies only (`<name>.usda`), the one nothing references first
+    candidates = find_root_candidates(scene_dir)
+    assert candidates[0] == "shot.usda"
+    assert "assets/floor.usdc" not in candidates
+
+
+def test_root_candidates_are_pipeline_assemblies(tmp_path):
+    from server.uploads import assembly_tier
+
+    assert assembly_tier("sets/set-alhambra/set-alhambra.usda") == "set"
+    assert assembly_tier("kilo-0010.usda") == "shot"
+    assert assembly_tier("assets/env-stone/env-stone.usda") == "asset"
+    for block in ("set-alhambra_layout.usda", "env-stone_model.usdc", "Env-Stone.usda", "env-stone.usdc"):
+        assert assembly_tier(block) is None
+    for rel in ("assets/env-rock/env-rock.usda", "assets/env-rock/env-rock_model.usda",
+                "sets/set-yard/set-yard.usda", "sets/set-yard/set-yard_layout.usda", "shots/kilo-0010.usda"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("#usda 1.0\n")
+    assert find_root_candidates(tmp_path) == [
+        "shots/kilo-0010.usda", "sets/set-yard/set-yard.usda", "assets/env-rock/env-rock.usda"]
 
 
 def test_stage_units_and_axis_become_root_transform(converted):
@@ -333,3 +352,163 @@ def test_lods_can_be_disabled(tmp_path, monkeypatch):
     monkeypatch.setattr(conv, "LOD_ENABLED", False)
     gltf, _ = parse_glb(convert(str(_dense_grid_stage(tmp_path / "dense.usda")))[0])
     assert len(gltf["scenes"]) == 1 and len(gltf["meshes"]) == 1
+
+
+def _write_exr(path, pixels):
+    OpenEXR = pytest.importorskip("OpenEXR")
+    channels = {"RGB" if pixels.shape[-1] == 3 else "RGBA": pixels}
+    header = {"compression": OpenEXR.ZIP_COMPRESSION, "type": OpenEXR.scanlineimage}
+    with OpenEXR.File(header, channels) as f:
+        f.write(str(path))
+
+
+def _image_pixels(gltf, binary, name):
+    import io
+
+    from PIL import Image
+
+    im = next(i for i in gltf["images"] if i["name"] == name)
+    bv = gltf["bufferViews"][im["bufferView"]]
+    start = bv.get("byteOffset", 0)
+    img = Image.open(io.BytesIO(binary[start:start + bv["byteLength"]]))
+    return im["mimeType"], np.asarray(img.convert("RGB"), dtype=np.float32).reshape(-1, 3).mean(axis=0)
+
+
+def test_materialx_exr_textures(tmp_path):
+    from pxr import UsdShade
+
+    size = (64, 64)
+    _write_exr(tmp_path / "bc.exr", np.full(size + (3,), 0.214, np.float32))          # linear 0.214 = sRGB 128
+    _write_exr(tmp_path / "bc_srgb.exr", np.full(size + (3,), 0.5, np.float32))       # already sRGB-encoded
+    _write_exr(tmp_path / "aorm.exr", np.dstack([np.full(size, v, np.float16) for v in (1.0, 0.6, 0.0)]))
+    _write_exr(tmp_path / "n.exr", np.dstack([np.zeros(size), np.zeros(size), np.ones(size)]).astype(np.float32))
+
+    path = tmp_path / "exr.usda"
+    stage = Usd.Stage.CreateNew(str(path))
+
+    def material(name, bc_file, bc_space):
+        mat = UsdShade.Material.Define(stage, f"/World/{name}")
+
+        def shader(n, sid):
+            s = UsdShade.Shader.Define(stage, f"/World/{name}/{n}")
+            s.CreateIdAttr(sid)
+            return s
+
+        def image(n, file, space):
+            s = shader(n, "ND_image_color3")
+            f = s.CreateInput("file", Sdf.ValueTypeNames.Asset)
+            f.Set(file)
+            if space:
+                f.GetAttr().SetColorSpace(space)
+            return s
+
+        surf = shader("surface", "ND_standard_surface_surfaceshader")
+        surf.CreateInput("base_color", Sdf.ValueTypeNames.Color3f).ConnectToSource(
+            image("bc", bc_file, bc_space).ConnectableAPI(), "out")
+        sep = shader("sep", "ND_separate3_vector3")
+        sep.CreateInput("in", Sdf.ValueTypeNames.Vector3f).ConnectToSource(
+            image("aorm", "./aorm.exr", "Raw").ConnectableAPI(), "out")
+        surf.CreateInput("specular_roughness", Sdf.ValueTypeNames.Float).ConnectToSource(sep.ConnectableAPI(), "outy")
+        nmap = shader("nmap", "ND_normalmap_float")
+        nmap.CreateInput("in", Sdf.ValueTypeNames.Vector3f).ConnectToSource(
+            image("n", "./n.exr", "Raw").ConnectableAPI(), "out")
+        surf.CreateInput("normal", Sdf.ValueTypeNames.Vector3f).ConnectToSource(nmap.ConnectableAPI(), "out")
+        mat.CreateSurfaceOutput("mtlx").ConnectToSource(surf.ConnectableAPI(), "out")
+        return mat
+
+    for i, (file, space) in enumerate([("./bc.exr", None), ("./bc_srgb.exr", "srgb_texture")]):
+        cube = UsdGeom.Cube.Define(stage, f"/World/Cube{i}")
+        UsdShade.MaterialBindingAPI.Apply(cube.GetPrim()).Bind(material(f"Mtl{i}", file, space))
+    stage.Save()
+
+    data, info = convert(str(path))
+    gltf, binary = parse_glb(data)
+    assert not [w for w in info["warnings"] if "EXR" in w or "texture" in w.lower()]
+    mime, linear = _image_pixels(gltf, binary, "bc.exr")
+    assert mime == "image/jpeg"
+    assert linear == pytest.approx([128, 128, 128], abs=2)   # linear data is sRGB-encoded for glTF
+    _, srgb = _image_pixels(gltf, binary, "bc_srgb.exr")
+    assert srgb == pytest.approx([128, 128, 128], abs=2)     # tagged sRGB is kept as is
+    _, normal = _image_pixels(gltf, binary, "n.exr")
+    assert normal == pytest.approx([0, 0, 255], abs=2)       # raw data is not curve-encoded
+    # separate3.outy picks roughness from G; the map is already packed glTF-style
+    pbr = gltf["materials"][0]["pbrMetallicRoughness"]
+    assert pbr["roughnessFactor"] == 1.0
+    _, orm = _image_pixels(gltf, binary, "aorm.exr")
+    assert orm[1] == pytest.approx(0.6 * 255, abs=2)
+
+
+def test_exr_signed_normals_and_colorspaces():
+    from server import exr
+
+    px = np.dstack([np.full((4, 4), -1.0), np.zeros((4, 4)), np.ones((4, 4))]).astype(np.float32)
+    img = exr.to_image(px, "rgb", color=False, normal=True)
+    assert np.asarray(img)[0, 0].tolist() == [0, 128, 255]
+    assert exr.classify_colorspace("srgb_texture") == "srgb"
+    assert exr.classify_colorspace("lin_srgb") == "linear"
+    assert exr.classify_colorspace("ACES - ACEScg") == "acescg"
+    assert exr.classify_colorspace("Utility - Raw") == "raw"
+    assert exr.classify_colorspace("auto") is None
+
+
+def test_exr_without_openexr_warns(tmp_path, monkeypatch):
+    from pxr import UsdShade
+
+    from server import exr
+
+    _write_exr(tmp_path / "bc.exr", np.full((8, 8, 3), 0.5, np.float32))
+    monkeypatch.setattr(exr, "available", lambda: False)
+    path = tmp_path / "s.usda"
+    stage = Usd.Stage.CreateNew(str(path))
+    cube = UsdGeom.Cube.Define(stage, "/Cube")
+    mat = UsdShade.Material.Define(stage, "/Mtl")
+    tex = UsdShade.Shader.Define(stage, "/Mtl/tex")
+    tex.CreateIdAttr("UsdUVTexture")
+    tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set("./bc.exr")
+    surf = UsdShade.Shader.Define(stage, "/Mtl/surf")
+    surf.CreateIdAttr("UsdPreviewSurface")
+    surf.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(tex.ConnectableAPI(), "rgb")
+    mat.CreateSurfaceOutput().ConnectToSource(surf.ConnectableAPI(), "surface")
+    UsdShade.MaterialBindingAPI.Apply(cube.GetPrim()).Bind(mat)
+    stage.Save()
+
+    _, info = convert(str(path))
+    assert any("OpenEXR" in w for w in info["warnings"])
+
+
+def test_nodes_name_the_prim_the_scene_graph_selects(tmp_path, converted):
+    gltf, _, _ = converted
+    crate = _node(gltf, "/World/Crates/crate_0_1/geo")
+    assert crate["extras"]["usdPath"] == "/World/Crates/crate_0_1/geo"  # an instance proxy path
+
+    data, _ = convert(str(_instancer_stage(tmp_path / "pi.usda")))
+    gltf, binary = parse_glb(data)
+    nodes = {n["name"]: n for n in gltf["nodes"]}
+    boxes = nodes["/World/Scatter/Box"]["extras"]
+    # picking an instance selects the instancer; ids are authored indices (11 = index 1 is inactive)
+    assert boxes["usdPath"] == "/World/Scatter"
+    assert boxes["usdProto"] == "/World/Scatter/Prototypes/Box"
+    assert accessor(gltf, binary, boxes["usdInstanceIds"]).tolist() == [0, 2]
+    balls = nodes["/World/Rows/Row"]["extras"]
+    # nested instancers select the outermost one: 2 rows x 3 balls, row index per ball
+    assert balls["usdPath"] == "/World/Rows"
+    assert balls["usdProto"] == "/World/Rows/Prototypes/Row/Inner/Prototypes/Ball"
+    assert accessor(gltf, binary, balls["usdInstanceIds"]).tolist() == [0, 1, 0, 1, 0, 1]
+
+
+def test_variant_overrides(scene_dir):
+    tower = str(scene_dir / "assets" / "tower.usda")
+    _, info = convert(tower)
+    assert info["defaultVariants"] == {
+        "prim": "/Tower", "sets": [{"name": "color", "selection": "stone", "options": ["sand", "stone"]}]}
+    data, info = convert(tower, variants={"/Tower": {"color": "sand"}})
+    assert info["defaultVariants"]["sets"][0]["selection"] == "sand"
+    assert info["variants"] == {"/Tower": {"color": "sand"}}
+    gltf, binary = parse_glb(data)
+    body = next(m for m in gltf["meshes"] if m["name"] == "/Tower/body")
+    material = gltf["materials"][body["primitives"][0]["material"]]
+    assert np.allclose(material["pbrMetallicRoughness"]["baseColorFactor"][:3], (0.85, 0.75, 0.5))
+    # the files on disk are untouched
+    assert Usd.Stage.Open(tower).GetDefaultPrim().GetVariantSet("color").GetVariantSelection() == "stone"
+    with pytest.raises(Exception):
+        convert(tower, variants={"not a path": {"color": "sand"}})

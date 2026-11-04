@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="100%"
+   height="100%"
+   viewBox="0 0 16 16"
+   version="1.1"
+   xml:space="preserve"
+   style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"
+   id="svg7950"
+   sodipodi:docname="primtype_karmalightfilter.svg"
+   inkscape:version="1.2.1 (9c6d41e, 2022-07-14)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"><defs
+   id="defs7954" /><sodipodi:namedview
+   id="namedview7952"
+   pagecolor="#ffffff"
+   bordercolor="#000000"
+   borderopacity="0.25"
+   inkscape:showpageshadow="2"
+   inkscape:pageopacity="0.0"
+   inkscape:pagecheckerboard="0"
+   inkscape:deskcolor="#d1d1d1"
+   showgrid="false"
+   inkscape:zoom="64.1875"
+   inkscape:cx="8"
+   inkscape:cy="7.9922103"
+   inkscape:window-width="2560"
+   inkscape:window-height="1367"
+   inkscape:window-x="0"
+   inkscape:window-y="42"
+   inkscape:window-maximized="1"
+   inkscape:current-layer="svg7950" />
+    <g
+   id="primtype_karmalightfilter"
+   transform="translate(0.11800002,0.1835)">
+        <ellipse
+   cx="9.882"
+   cy="10.879"
+   rx="5"
+   ry="3.319"
+   style="fill:#f4bc78"
+   id="ellipse7937" />
+        <path
+   d="m 9.882,7.56 c 2.76,0 5,1.487 5,3.319 0,1.832 -2.24,3.319 -5,3.319 -2.76,0 -5,-1.487 -5,-3.319 0,-1.832 2.24,-3.319 5,-3.319 z m 0,1 c -1.376,0 -2.607,0.416 -3.364,1.101 -0.381,0.345 -0.636,0.757 -0.636,1.218 0,0.461 0.255,0.873 0.636,1.218 0.757,0.685 1.988,1.101 3.364,1.101 1.376,0 2.607,-0.416 3.364,-1.101 0.381,-0.345 0.636,-0.757 0.636,-1.218 0,-0.461 -0.255,-0.873 -0.636,-1.218 C 12.489,8.976 11.258,8.56 9.882,8.56 Z"
+   style="fill:#ff6b02"
+   id="path7939" />
+        <ellipse
+   cx="4.882"
+   cy="8.073"
+   rx="5"
+   ry="3.319"
+   style="fill:#e8b9fc"
+   id="ellipse7941" />
+        <path
+   d="m 4.882,4.754 c 2.76,0 5,1.487 5,3.319 0,1.832 -2.24,3.319 -5,3.319 -2.76,0 -5,-1.487 -5,-3.319 0,-1.832 2.24,-3.319 5,-3.319 z m 0,1 C 3.506,5.754 2.275,6.17 1.518,6.855 1.137,7.2 0.882,7.612 0.882,8.073 c 0,0.461 0.255,0.873 0.636,1.218 0.757,0.685 1.988,1.101 3.364,1.101 1.376,0 2.607,-0.416 3.364,-1.101 C 8.627,8.946 8.882,8.534 8.882,8.073 8.882,7.612 8.627,7.2 8.246,6.855 7.489,6.17 6.258,5.754 4.882,5.754 Z"
+   style="fill:#ab15f6"
+   id="path7943" />
+        <ellipse
+   cx="10.882"
+   cy="4.7540002"
+   rx="5"
+   ry="3.319"
+   style="fill:#f8eddd"
+   id="ellipse7945" />
+        <path
+   d="m 10.882,1.435 c 2.76,0 5,1.487 5,3.319 0,1.832 -2.24,3.319 -5,3.319 -2.76,0 -5,-1.487 -5,-3.319 0,-1.832 2.24,-3.319 5,-3.319 z m 0,1 c -1.376,0 -2.607,0.416 -3.364,1.101 -0.381,0.345 -0.636,0.757 -0.636,1.218 0,0.461 0.255,0.873 0.636,1.218 0.757,0.685 1.988,1.101 3.364,1.101 1.376,0 2.607,-0.416 3.364,-1.101 0.381,-0.345 0.636,-0.757 0.636,-1.218 0,-0.461 -0.255,-0.873 -0.636,-1.218 C 13.489,2.851 12.258,2.435 10.882,2.435 Z"
+   style="fill:#ffa600"
+   id="path7947" />
+    </g>
+</svg>

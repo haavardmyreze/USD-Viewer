@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="100%"
+   height="100%"
+   viewBox="0 0 16 16"
+   version="1.1"
+   xml:space="preserve"
+   style="fill-rule:evenodd;clip-rule:evenodd;stroke-linecap:round;stroke-miterlimit:10;"
+   id="svg4211"
+   sodipodi:docname="rectlight.svg"
+   inkscape:version="1.2.1 (9c6d41e, 2022-07-14)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"><defs
+   id="defs4215" /><sodipodi:namedview
+   id="namedview4213"
+   pagecolor="#ffffff"
+   bordercolor="#000000"
+   borderopacity="0.25"
+   inkscape:showpageshadow="2"
+   inkscape:pageopacity="0.0"
+   inkscape:pagecheckerboard="0"
+   inkscape:deskcolor="#d1d1d1"
+   showgrid="false"
+   inkscape:zoom="64.1875"
+   inkscape:cx="8"
+   inkscape:cy="7.9922103"
+   inkscape:window-width="2560"
+   inkscape:window-height="1367"
+   inkscape:window-x="0"
+   inkscape:window-y="42"
+   inkscape:window-maximized="1"
+   inkscape:current-layer="svg4211" />
+    <g
+   id="rectlight"
+   transform="translate(0.118,0.1838116)">
+        <path
+   d="M 2.71,13.959 14.024,2.645 8.367,-0.184 -0.118,8.302 Z"
+   style="fill:#fff2d5"
+   id="path4194" />
+        <path
+   d="m 2.71,13.959 -2.828,-5.657 8.485,-8.486 5.657,2.829 z m 0.329,-2.026 8.959,-8.959 c 0,0 -3.394,-1.697 -3.394,-1.697 0,0 -7.262,7.262 -7.262,7.262 z"
+   style="fill:#ffc235"
+   id="path4196" />
+        <path
+   d="m 15.382,13.195 v 2.121 h -2.121"
+   style="fill:none;stroke:#ffc235;stroke-width:1px"
+   id="path4198" />
+        <path
+   d="m 6.953,6.887 c 0,0 6.548,6.548 8.429,8.429"
+   style="fill:none;stroke:#ffc235;stroke-width:1px;stroke-linejoin:round;stroke-miterlimit:1.5"
+   id="path4200" />
+        <path
+   d="M 8.259,13.174 7.577,15.182 5.568,14.499"
+   style="fill:none;stroke:#ffc235;stroke-width:1px"
+   id="path4202" />
+        <path
+   d="m 4.166,8.26 c 0,0 2.515,5.103 3.411,6.922"
+   style="fill:none;stroke:#ffc235;stroke-width:1px;stroke-linejoin:round;stroke-miterlimit:1.5"
+   id="path4204" />
+        <path
+   d="m 14.551,5.495 0.682,2.009 -2.008,0.683"
+   style="fill:none;stroke:#ffc235;stroke-width:1px"
+   id="path4206" />
+        <path
+   d="m 8.326,4.101 c 0,0 5.091,2.508 6.907,3.403"
+   style="fill:none;stroke:#ffc235;stroke-width:1px;stroke-linejoin:round;stroke-miterlimit:1.5"
+   id="path4208" />
+    </g>
+</svg>

@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="100%"
+   height="100%"
+   viewBox="0 0 16 16"
+   version="1.1"
+   xml:space="preserve"
+   style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"
+   id="svg4641"
+   sodipodi:docname="primtype_mesh.svg"
+   inkscape:version="1.2.1 (9c6d41e, 2022-07-14)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"><defs
+   id="defs4645" /><sodipodi:namedview
+   id="namedview4643"
+   pagecolor="#ffffff"
+   bordercolor="#000000"
+   borderopacity="0.25"
+   inkscape:showpageshadow="2"
+   inkscape:pageopacity="0.0"
+   inkscape:pagecheckerboard="0"
+   inkscape:deskcolor="#d1d1d1"
+   showgrid="false"
+   inkscape:zoom="64.1875"
+   inkscape:cx="8"
+   inkscape:cy="7.9922103"
+   inkscape:window-width="2560"
+   inkscape:window-height="1367"
+   inkscape:window-x="0"
+   inkscape:window-y="42"
+   inkscape:window-maximized="1"
+   inkscape:current-layer="svg4641" />
+    <g
+   id="primtype_mesh"
+   transform="translate(0.01200002,0.18349978)">
+        <path
+   d="M 11.544,14.928 15.099,9.594 8.875,0.705 Z"
+   style="fill:#4c6582"
+   id="path4624" />
+        <path
+   d="m 11.987,11.688 -1.18,-6.389 2.821,4.023 c 0,0 -1.641,2.366 -1.641,2.366 z"
+   style="fill:#a0adbd"
+   id="path4626" />
+        <path
+   d="M 11.544,14.928 0.877,11.372 8.875,0.705 Z"
+   style="fill:#a0adbd"
+   id="path4628" />
+        <path
+   d="M 8.873,11.865 4.24,10.321 7.714,5.689 Z"
+   style="fill:#4c6582"
+   id="path4630" />
+        <circle
+   cx="8.8769999"
+   cy="0.70499998"
+   r="0.889"
+   style="fill:#95a4b5"
+   id="circle4632" />
+        <circle
+   cx="0.87699997"
+   cy="11.277"
+   r="0.889"
+   style="fill:#95a4b5"
+   id="circle4634" />
+        <circle
+   cx="15.099"
+   cy="9.4989996"
+   r="0.889"
+   style="fill:#95a4b5"
+   id="circle4636" />
+        <circle
+   cx="11.544"
+   cy="14.928"
+   r="0.889"
+   style="fill:#95a4b5"
+   id="circle4638" />
+    </g>
+</svg>

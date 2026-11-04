@@ -21,15 +21,17 @@ from __future__ import annotations
 import io
 import math
 import os
+import threading
 import zipfile
 from collections import Counter
 
 import numpy as np
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, UsdUtils
 
+from . import exr
 from .glb import GlbBuilder
 
-CONVERTER_VERSION = "3"
+CONVERTER_VERSION = "5"
 
 # Level of detail: meshes with at least this many triangles get simplified
 # versions (each ~1/4 of the previous) that the viewer switches to by screen size.
@@ -44,6 +46,7 @@ PURPOSES = ("render", "proxy")
 
 # glTF sampler wrap modes
 REPEAT, CLAMP, MIRROR = 10497, 33071, 33648
+_COLOR_PURPOSES = ("baseColor", "emissive")
 _WRAP = {"repeat": REPEAT, "mirror": MIRROR, "clamp": CLAMP, "black": CLAMP}
 
 _DEFAULT_MATERIAL = {
@@ -296,6 +299,52 @@ def _gen_plane(width, length):
 # ---------------------------------------------------------------------------
 
 
+class _TextureCache:
+    """Encoded textures kept between conversions, so switching a variant or the
+    purpose does not decode the same (EXR) maps again. Keyed by the image key
+    plus each source file's size and modification time."""
+
+    def __init__(self, max_bytes=768 * 1024 * 1024):
+        self.max_bytes = max_bytes
+        self.items: dict = {}
+        self.size = 0
+        self.lock = threading.Lock()
+
+    @staticmethod
+    def _stamp(key):
+        out = []
+        for part in key[1:]:
+            for value in (part if isinstance(part, tuple) else (part,)):
+                if isinstance(value, str) and os.path.isabs(value.split("[", 1)[0]):
+                    try:
+                        st = os.stat(value.split("[", 1)[0])
+                        out.append((value, st.st_size, st.st_mtime_ns))
+                    except OSError:
+                        return None
+        return (key, MAX_TEXTURE_SIZE, tuple(out))
+
+    def get(self, key, producer):
+        stamp = self._stamp(key)
+        if stamp is not None:
+            with self.lock:
+                hit = self.items.pop(stamp, None)
+                if hit is not None:
+                    self.items[stamp] = hit  # most recently used last
+                    return hit
+        result = producer()
+        if result is not None and stamp is not None:
+            with self.lock:
+                self.items[stamp] = result
+                self.size += len(result[0])
+                while self.size > self.max_bytes and self.items:
+                    old = self.items.pop(next(iter(self.items)))
+                    self.size -= len(old[0])
+        return result
+
+
+_TEXTURE_CACHE = _TextureCache()
+
+
 class _Converter:
     def __init__(self, stage: Usd.Stage, purpose: str = "render") -> None:
         self.stage = stage
@@ -324,9 +373,12 @@ class _Converter:
     def _collect(self, start, rel=None):
         """Renderable items under `start` (inclusive).
 
-        Returns a list of (name, mesh_index, matrices, n_tris), where matrices is
-        an (N, 4, 4) array of row-vector USD matrices: world space, or, when `rel`
-        is given, world space multiplied by `rel` (used for prototype space).
+        Returns a list of (name, mesh_index, matrices, n_tris, source), where
+        matrices is an (N, 4, 4) array of row-vector USD matrices: world space, or,
+        when `rel` is given, world space multiplied by `rel` (used for prototype
+        space). `source` says which prim the viewer selects for it: {"path"} for a
+        gprim; for PointInstancer instances the instancer's path, the authored
+        instance index of each matrix ("ids") and the gprim inside the prototype.
         """
         out = []
         it = iter(Usd.PrimRange(start, self.predicate))
@@ -358,7 +410,8 @@ class _Converter:
                     m = np.array(self.xf_cache.GetLocalToWorldTransform(prim), dtype=np.float64)
                     if rel is not None:
                         m = m @ rel
-                    out.append((prim.GetPath().pathString, mesh_index, m[None], n_tris))
+                    path = prim.GetPath().pathString
+                    out.append((path, mesh_index, m[None], n_tris, {"path": path}))
             elif type_name == "Camera":
                 self.stats["cameras"] += 1
             elif type_name not in _KNOWN_NON_GEOM and prim.IsA(UsdGeom.Gprim):
@@ -379,10 +432,11 @@ class _Converter:
             self.report.warn(f"{path}: PointInstancer arrays are inconsistent; skipped")
             return []
         inst = np.array(xforms, dtype=np.float64).reshape(-1, 4, 4)
+        authored = np.arange(len(proto_idx))  # instance index as authored, before masking
         mask = pi.ComputeMaskAtTime(t)
         if mask is not None and len(mask) == len(proto_idx):
             keep = np.array(mask, dtype=bool)
-            inst, proto_idx = inst[keep], proto_idx[keep]
+            inst, proto_idx, authored = inst[keep], proto_idx[keep], authored[keep]
         if ((proto_idx < 0) | (proto_idx >= len(protos))).any():
             self.report.warn(f"{path}: protoIndices out of range ignored")
 
@@ -403,9 +457,12 @@ class _Converter:
             items = self._prototype_items(proto)
             base = inst[sel] @ world  # (k, 4, 4): instance -> PointInstancer -> world
             label = f"{path}/{proto_path.name}"
-            for name, mesh_index, mats, n_tris in items:
+            for name, mesh_index, mats, n_tris, src in items:
                 combined = (mats[:, None] @ base[None]).reshape(-1, 4, 4)
-                out.append((label, mesh_index, combined, n_tris))
+                # combined[i * k + j] is prototype matrix i placed by instance j
+                source = {"path": path, "ids": np.tile(authored[sel], len(mats)),
+                          "proto": src.get("proto", src["path"])}
+                out.append((label, mesh_index, combined, n_tris, source))
         return out
 
     def _prototype_items(self, proto):
@@ -432,12 +489,19 @@ class _Converter:
 
     def _emit(self, item) -> list[int]:
         """Write glTF nodes for one collected item."""
-        name, mesh_index, mats, n_tris = item
+        name, mesh_index, mats, n_tris, source = item
         n = len(mats)
         self.stats["mesh_prims"] += n
         self.stats["triangles"] += n * n_tris
+        # the prim the viewer's scene graph selects when this is picked
+        extras = {"usdPath": source["path"]}
+        if source.get("proto"):
+            extras["usdProto"] = source["proto"]
+        ids = source.get("ids")
         if n == 1:
-            node = {"name": name, "mesh": mesh_index}
+            if ids is not None:
+                extras["usdInstance"] = int(ids[0])
+            node = {"name": name, "mesh": mesh_index, "extras": extras}
             m = mats[0]
             if not np.allclose(m, np.eye(4)):
                 node["matrix"] = [float(x) for x in m.reshape(-1)]
@@ -449,8 +513,11 @@ class _Converter:
             # shear or mirroring: fall back to one node per instance
             nodes = []
             for i, m in enumerate(mats):
+                node_extras = dict(extras)
+                if ids is not None:
+                    node_extras["usdInstance"] = int(ids[i])
                 nodes.append(self._add_with_lods({
-                    "name": f"{name}[{i}]", "mesh": mesh_index,
+                    "name": f"{name}[{i}]", "mesh": mesh_index, "extras": node_extras,
                     "matrix": [float(x) for x in m.reshape(-1)]}))
             return nodes
         t, r, s = trs
@@ -462,7 +529,10 @@ class _Converter:
         used = self.glb.gltf.setdefault("extensionsUsed", [])
         if "EXT_mesh_gpu_instancing" not in used:
             used.append("EXT_mesh_gpu_instancing")
-        return [self._add_with_lods({"name": name, "mesh": mesh_index,
+        if ids is not None:
+            # authored instance index per glTF instance (float: exact up to 2^24)
+            extras["usdInstanceIds"] = self.glb.add_attribute(np.asarray(ids, dtype=np.float32), target=None)
+        return [self._add_with_lods({"name": name, "mesh": mesh_index, "extras": extras,
                                      "extensions": {"EXT_mesh_gpu_instancing": ext}})]
 
     def _add_with_lods(self, node: dict) -> int:
@@ -474,11 +544,12 @@ class _Converter:
             return self.glb.add_node(node)
         group = len(self.lod_groups)
         self.lod_groups.append(node["name"])
-        base = self.glb.add_node({**node, "extras": {"usdvLod": {"group": group, "level": 0}}})
+        extras = node.get("extras", {})
+        base = self.glb.add_node({**node, "extras": {**extras, "usdvLod": {"group": group, "level": 0}}})
         for level, mesh in enumerate(lods, 1):
             self.lod_nodes.append(self.glb.add_node({
                 **node, "name": f"{node['name']} (LOD{level})", "mesh": mesh,
-                "extras": {"usdvLod": {"group": group, "level": level}}}))
+                "extras": {**extras, "usdvLod": {"group": group, "level": level}}}))
         return base
 
     def run(self) -> tuple[bytes, dict]:
@@ -891,6 +962,7 @@ class _Converter:
             info = {
                 "path": f.resolvedPath or None,
                 "authored": f.path,
+                "colorSpace": self._asset_colorspace(node, "file"),
                 "channel": channel or "rgb",
                 "wrapS": REPEAT,
                 "wrapT": REPEAT,
@@ -902,6 +974,10 @@ class _Converter:
             if "triplanar" in nid.lower():
                 info["triplanar"] = self._mx_triplanar(node, depth)
             return "texture", info
+        if "_separate" in nid:  # separate2/3/4: outx|outr -> r, outy|outg -> g, ...
+            out = attr.GetBaseName()
+            ch = {"x": "r", "y": "g", "z": "b", "w": "a"}.get(out[-1:], out[-1:])
+            return self._mx_trace(node, "in", ch if ch in "rgba" else None, depth + 1)
         if "_extract_" in nid:
             k, idx = self._mx_trace(node, "index", depth=depth + 1)
             idx = int(idx) if k == "value" else 0
@@ -912,6 +988,18 @@ class _Converter:
             if node.GetInput(upstream):
                 return self._mx_trace(node, upstream, channel, depth + 1)
         return None, None
+
+    @staticmethod
+    def _asset_colorspace(shader, name):
+        """colorSpace metadata on a file input or on the attribute it is connected to."""
+        inp = shader.GetInput(name)
+        if not inp:
+            return None
+        for a in [inp.GetAttr()] + list(inp.GetValueProducingAttributes()):
+            cs = a.GetColorSpace() if a.HasColorSpace() else ""
+            if cs:
+                return str(cs)
+        return None
 
     def _mx_triplanar(self, node, depth):
         """Projection settings of a triplanar texture node: position scale + space."""
@@ -1059,9 +1147,12 @@ class _Converter:
             return default if v is None or kind != "value" else v
 
         f = val("file")
+        source_cs = str(val("sourceColorSpace", "") or "")
         info = {
             "path": f.resolvedPath if isinstance(f, Sdf.AssetPath) else None,
             "authored": f.path if isinstance(f, Sdf.AssetPath) else None,
+            "colorSpace": (source_cs if source_cs not in ("", "auto") else None)
+                          or self._asset_colorspace(tex, "file"),
             "channel": channel,
             "wrapS": _WRAP.get(str(val("wrapS", "repeat")), REPEAT),
             "wrapT": _WRAP.get(str(val("wrapT", "repeat")), REPEAT),
@@ -1190,13 +1281,15 @@ class _Converter:
         except (OSError, KeyError, zipfile.BadZipFile):
             return None
 
-    def _load_pil(self, info, mat_path):
+    def _load_pil(self, info, mat_path, purpose="data"):
         from PIL import Image
 
         data = self._read_asset(info["path"])
         if data is None:
             self.report.warn(f"Texture not found: {info['authored']} (material {_display(mat_path)})")
             return None
+        if exr.is_exr(data):
+            return self._load_exr(data, info, purpose)
         try:
             Image.MAX_IMAGE_PIXELS = None  # local production textures (8k/16k) are expected
             img = Image.open(io.BytesIO(data))
@@ -1204,6 +1297,20 @@ class _Converter:
             return img
         except Exception:
             self.report.warn(f"Unsupported texture format: {info['authored']}")
+            return None
+
+    def _load_exr(self, data, info, purpose):
+        if not exr.available():
+            if not getattr(self, "_exr_warned", False):
+                self._exr_warned = True
+                self.report.warn("EXR textures skipped: install the OpenEXR package (pip install OpenEXR)")
+            return None
+        try:
+            px, kind = exr.read(data, info["path"])
+            return exr.to_image(px, kind, color=purpose in _COLOR_PURPOSES, normal=purpose == "normal",
+                                colorspace=info.get("colorSpace"), max_size=MAX_TEXTURE_SIZE)
+        except Exception as e:  # noqa: BLE001 - corrupt or exotic files only cost the texture
+            self.report.warn(f"Could not read EXR texture {info['authored']}: {e}")
             return None
 
     @staticmethod
@@ -1230,7 +1337,7 @@ class _Converter:
     def _image_from_key(self, key, producer):
         idx = self.image_index.get(key)
         if idx is None:
-            result = producer()
+            result = _TEXTURE_CACHE.get(key, producer)
             if result is None:
                 self.image_index[key] = -1
                 return None
@@ -1257,12 +1364,14 @@ class _Converter:
                     size = (0, 0)
                 if not MAX_TEXTURE_SIZE or max(size) <= MAX_TEXTURE_SIZE:
                     return data, mime
-            img = self._load_pil(info, mat_path)
+            img = self._load_pil(info, mat_path, purpose)
             if img is None:
                 return None
             return self._encode(img.convert("RGBA" if "A" in img.getbands() else "RGB"))
 
-        image = self._image_from_key(("file", info["path"]), produce)
+        # the same float file can need a different 8-bit encoding per role
+        image = self._image_from_key(("file", info["path"], purpose in _COLOR_PURPOSES, purpose == "normal"),
+                                     produce)
         if image is None:
             return None
         sampler = self.glb.add_sampler(info["wrapS"], info["wrapT"])
@@ -1289,7 +1398,7 @@ class _Converter:
             return self._texture_ref(info, mat_path, purpose)
 
         def produce():
-            img = self._load_pil(info, mat_path)
+            img = self._load_pil(info, mat_path, purpose)
             if img is None:
                 return None
             from PIL import Image
@@ -1307,7 +1416,7 @@ class _Converter:
 
         def produce():
             from PIL import Image
-            base = self._load_pil(diffuse, mat_path) if diffuse else None
+            base = self._load_pil(diffuse, mat_path, "baseColor") if diffuse else None
             op = self._load_pil(opacity, mat_path) if opacity else None
             if base is None and op is None:
                 return None
@@ -1371,20 +1480,45 @@ def dependency_report(root_path: str) -> dict:
     }
 
 
-def convert(root_path: str, purpose: str = "render") -> tuple[bytes, dict]:
-    """Open root_path as a USD stage and return (glb_bytes, report).
+def variant_session_layer(variants: dict | None):
+    """An anonymous session layer selecting variants: {prim path: {set: variant}}.
 
-    purpose: "render" shows render + default geometry (what a renderer sees),
-    "proxy" shows proxy + default geometry (lightweight viewport stand-ins).
+    Opening a stage with it makes the selections part of the first composition,
+    so nothing is composed twice, and the files on disk are never touched.
     """
+    session = Sdf.Layer.CreateAnonymous("usdv-variants.usda")
+    for prim_path, selections in (variants or {}).items():
+        if not Sdf.Path.IsValidPathString(prim_path) or not Sdf.Path(prim_path).IsPrimPath():
+            raise ConversionError(f"Not a prim path: {prim_path}")
+        spec = Sdf.CreatePrimInLayer(session, Sdf.Path(prim_path))
+        for name, value in selections.items():
+            spec.variantSelections[str(name)] = str(value)
+    return session
+
+
+def open_stage(root_path: str, variants: dict | None = None):
     if not os.path.isfile(root_path):
         raise ConversionError(f"Root layer not found: {root_path}")
     try:
-        stage = Usd.Stage.Open(root_path, Usd.Stage.LoadAll)
+        stage = Usd.Stage.Open(Sdf.Layer.FindOrOpen(root_path), variant_session_layer(variants),
+                               Usd.Stage.LoadAll)
+    except ConversionError:
+        raise
     except Exception as exc:
         raise ConversionError(f"USD could not open the stage: {exc}") from exc
     if not stage:
         raise ConversionError("USD could not open the stage")
+    return stage
+
+
+def convert(root_path: str, purpose: str = "render", variants: dict | None = None) -> tuple[bytes, dict]:
+    """Open root_path as a USD stage and return (glb_bytes, report).
+
+    purpose: "render" shows render + default geometry (what a renderer sees),
+    "proxy" shows proxy + default geometry (lightweight viewport stand-ins).
+    variants: variant selections to override, {prim path: {set: variant}}.
+    """
+    stage = open_stage(root_path, variants)
 
     composition_errors = []
     try:
@@ -1395,7 +1529,28 @@ def convert(root_path: str, purpose: str = "render") -> tuple[bytes, dict]:
     glb_bytes, info = _Converter(stage, purpose).run()
     info["compositionErrors"] = composition_errors
     info["variantSets"] = _variant_summary(stage)
+    info["defaultVariants"] = default_prim_variants(stage)
+    info["variants"] = variants or {}
     return glb_bytes, info
+
+
+def default_prim_variants(stage) -> dict | None:
+    """The default prim's variant sets, with what is selected now and the options.
+
+    Without a default prim, a stage with a single root prim uses that one.
+    """
+    prim = stage.GetDefaultPrim()
+    if not prim:
+        roots = [p for p in stage.GetPseudoRoot().GetChildren() if p.IsActive() and not p.IsAbstract()]
+        prim = roots[0] if len(roots) == 1 else None
+    if not prim:
+        return None
+    vsets = prim.GetVariantSets()
+    sets = [{"name": name, "selection": vsets.GetVariantSelection(name) or None,
+             "options": list(vsets.GetVariantSet(name).GetVariantNames())}
+            for name in vsets.GetNames()]
+    sets = [v for v in sets if v["options"]]
+    return {"prim": prim.GetPath().pathString, "sets": sets} if sets else None
 
 
 def _variant_summary(stage, limit=200):

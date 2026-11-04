@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="100%"
+   height="100%"
+   viewBox="0 0 16 16"
+   version="1.1"
+   xml:space="preserve"
+   style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"
+   id="svg3393"
+   sodipodi:docname="primtype_tetmesh.svg"
+   inkscape:version="1.2.1 (9c6d41e, 2022-07-14)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"><defs
+   id="defs3397" /><sodipodi:namedview
+   id="namedview3395"
+   pagecolor="#ffffff"
+   bordercolor="#000000"
+   borderopacity="0.25"
+   inkscape:showpageshadow="2"
+   inkscape:pageopacity="0.0"
+   inkscape:pagecheckerboard="0"
+   inkscape:deskcolor="#d1d1d1"
+   showgrid="false"
+   inkscape:zoom="64.1875"
+   inkscape:cx="8"
+   inkscape:cy="7.9922103"
+   inkscape:window-width="2560"
+   inkscape:window-height="1367"
+   inkscape:window-x="0"
+   inkscape:window-y="42"
+   inkscape:window-maximized="1"
+   inkscape:current-layer="primtype_tetmesh" />
+    <g
+   id="primtype_tetmesh"
+   transform="matrix(0.98966663,0,0,0.98966663,0.15639716,0.26476565)">
+        <path
+   d="m 11.988,-0.184 2.615,6.539 -5.463,7.461 -3.152,2 -6.125,-12 z M 11.409,1.061 1.284,4.401 c 0,0 5.096,9.983 5.096,9.983 l 2.065,-1.311 5.024,-6.862 z"
+   style="fill:#a0adbd"
+   id="path3384" />
+        <path
+   d="m 5.926,15.694 -0.402,-0.787 5.87,-14.895 0.594,-0.196 4,10 z"
+   style="fill:#4c6582"
+   id="path3386" />
+        <path
+   d="m 5.926,15.694 -0.402,-0.787 5.87,-14.895 0.594,-0.196 4,10 z M 6.99,13.914 14.74,9.388 11.735,1.876 Z"
+   style="fill:#a0adbd"
+   id="path3388" />
+        <path
+   d="m 0.29790143,4.296096 0.108,-0.58 0.40200018,0.148 c 0.1560003,0.057 0.23600039,0.23 0.17900036,0.385 -0.058,0.155 -0.23000045,0.235 -0.38500054,0.178 l -0.403,-0.148 c -0.117,-0.041 -0.201,-0.152 -0.201,-0.283 0,-0.166 0.134,-0.3 0.3,0.3 z m 14.66200057,5.388 c -0.038,0 -0.074,-0.007 -0.108,-0.02 l -0.403,-0.148 c -0.155,-0.057 -0.235,-0.23 -0.178,-0.385 0.057,-0.155 0.23,-0.235 0.385,-0.178 l 0.403,0.148 z m -12.729,-4.658 c -0.156,-0.057 -0.236,-0.23 -0.178,-0.385 0.057,-0.156 0.229,-0.235 0.385,-0.178 l 0.814,0.299 c 0.156,0.057 0.235,0.23 0.178,0.385 -0.057,0.156 -0.229,0.235 -0.385,0.178 z m 2.443,0.898 c -0.155,-0.057 -0.235,-0.23 -0.178,-0.385 0.057,-0.156 0.23,-0.235 0.385,-0.178 l 0.815,0.299 c 0.155,0.057 0.235,0.23 0.178,0.385 -0.057,0.156 -0.23,0.235 -0.385,0.178 z m 2.444,0.898 c -0.155,-0.057 -0.235,-0.23 -0.178,-0.385 0.057,-0.156 0.23,-0.235 0.385,-0.178 l 0.815,0.299 c 0.155,0.057 0.235,0.23 0.178,0.385 -0.057,0.156 -0.23,0.235 -0.385,0.178 z m 2.444,0.898 c -0.155,-0.057 -0.235,-0.23 -0.178,-0.385 0.057,-0.155 0.229,-0.235 0.385,-0.178 l 0.814,0.299 c 0.156,0.057 0.236,0.23 0.179,0.385 -0.058,0.156 -0.23,0.235 -0.385,0.178 z m 2.444,0.898 c -0.156,-0.057 -0.236,-0.23 -0.178,-0.385 0.057,-0.155 0.229,-0.235 0.385,-0.178 l 0.814,0.299 c 0.156,0.057 0.235,0.23 0.178,0.385 -0.057,0.156 -0.229,0.236 -0.385,0.178 z"
+   style="fill:#a0adbd"
+   id="path3390" />
+    </g>
+</svg>

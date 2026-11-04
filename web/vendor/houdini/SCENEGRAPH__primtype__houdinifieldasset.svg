@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="100%" height="100%" viewBox="0 0 16 16" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:22;">
+    <g id="primtype_houdinifieldasset">
+        <g id="Field">
+            <path d="M1.047,4.805l-0,-2.415c-0,-0.417 0.166,-0.817 0.461,-1.113c0.295,-0.295 0.695,-0.461 1.113,-0.461c1.124,0 2.437,0 2.437,0" style="fill:none;stroke:rgb(198,220,226);stroke-width:0.95px;"/>
+            <path d="M11.065,0.816l2.408,0c0.417,0 0.818,0.166 1.113,0.461c0.295,0.296 0.461,0.696 0.461,1.113c-0,1.124 -0,2.437 -0,2.437" style="fill:none;stroke:rgb(198,220,226);stroke-width:0.95px;"/>
+            <path d="M15.047,10.796l-0,2.446c-0,0.87 -0.705,1.574 -1.574,1.574c-1.138,0 -2.475,0 -2.475,0" style="fill:none;stroke:rgb(198,220,226);stroke-width:0.95px;"/>
+            <path d="M5.021,14.816l-2.4,0c-0.418,0 -0.818,-0.165 -1.113,-0.461c-0.295,-0.295 -0.461,-0.695 -0.461,-1.113l-0,-2.397" style="fill:none;stroke:rgb(198,220,226);stroke-width:0.95px;"/>
+            <path d="M8.047,5.816l-0,4" style="fill:none;stroke:rgb(125,176,189);stroke-width:0.95px;"/>
+            <path d="M6.047,7.816l4,0" style="fill:none;stroke:rgb(125,176,189);stroke-width:0.95px;"/>
+        </g>
+        <g id="HoudiniLogo">
+            <rect id="rect973" x="3.034" y="2.663" width="10.177" height="10.144" style="fill:white;"/>
+            <path id="path1940" d="M9.814,8.217c-0.218,-1.022 -1.296,-2.231 -2.487,-2.495c-1.239,-0.273 -2.068,-0.28 -3.04,0.356c-0.286,0.187 -0.766,0.506 -1.214,0.982l0,1.584c0.632,-1.332 2.072,-2.448 3.684,-2.045c2.738,0.683 2.299,2.56 1.97,3.322c-0.59,1.37 -2.761,1.961 -3.429,0.652c-0.726,-1.422 0.893,-1.655 0.893,-1.655c0,-0 -0.421,0.398 0.107,0.924c0.366,0.366 1.063,0.034 1.305,-0.609c0.212,-0.561 -0.245,-1.339 -1.246,-1.423c-0.838,-0.072 -2.097,0.547 -2.225,1.792c-0.121,1.179 0.421,1.668 1.207,2.189c0.784,0.52 2.462,0.716 3.421,-0.198c1.042,-0.993 1.346,-2.012 1.054,-3.376Zm-6.741,-5.565l0,3.108c0.478,-0.412 0.877,-0.618 0.894,-0.628c1.746,-0.986 3.285,-0.497 4.19,-0.218c1.43,0.439 2.553,1.534 3.038,2.659c0.565,1.31 0.076,3.813 -1.831,5.078c-0.083,0.055 -0.167,0.102 -0.25,0.149l4.108,0l0,-10.148l-10.149,-0Zm0,8.483l0,1.666l1.786,-0c-0.132,-0.07 -0.253,-0.141 -0.359,-0.211c-0.525,-0.349 -1.084,-0.843 -1.427,-1.455Z" style="fill:rgb(242,103,34);fill-rule:nonzero;"/>
+            <rect id="rect971" x="3.034" y="2.663" width="10.177" height="10.144" style="fill:none;stroke:rgb(130,58,0);stroke-width:0.38px;stroke-miterlimit:4;"/>
+        </g>
+    </g>
+</svg>

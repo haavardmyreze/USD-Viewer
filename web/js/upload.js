@@ -98,13 +98,14 @@ async function postJson(url, payload) {
   return body;
 }
 
-export function convertUpload(uploadId, root, purpose = 'render') {
-  return postJson(`/api/uploads/${encodeURIComponent(uploadId)}/convert`, { root, purpose });
+/** variants: {prim path: {variant set: selection}} overrides, or null. */
+export function convertUpload(uploadId, root, purpose = 'render', variants = null) {
+  return postJson(`/api/uploads/${encodeURIComponent(uploadId)}/convert`, { root, purpose, variants });
 }
 
 /** Convert a file or folder straight from the server machine's disk. */
-export function openPath(path, root = null, purpose = 'render') {
-  return postJson('/api/open', { path, root, purpose });
+export function openPath(path, root = null, purpose = 'render', variants = null) {
+  return postJson('/api/open', { path, root, purpose, variants });
 }
 
 export async function getHealth() {

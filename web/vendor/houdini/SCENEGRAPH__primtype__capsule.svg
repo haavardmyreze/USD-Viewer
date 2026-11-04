@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="100%"
+   height="100%"
+   viewBox="0 0 16 16"
+   version="1.1"
+   xml:space="preserve"
+   style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"
+   id="svg1139"
+   sodipodi:docname="primtype_capsule.svg"
+   inkscape:version="1.2.1 (9c6d41e, 2022-07-14)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"><defs
+   id="defs1143" /><sodipodi:namedview
+   id="namedview1141"
+   pagecolor="#ffffff"
+   bordercolor="#000000"
+   borderopacity="0.25"
+   inkscape:showpageshadow="2"
+   inkscape:pageopacity="0.0"
+   inkscape:pagecheckerboard="0"
+   inkscape:deskcolor="#d1d1d1"
+   showgrid="false"
+   inkscape:zoom="64.1875"
+   inkscape:cx="8"
+   inkscape:cy="7.9922103"
+   inkscape:window-width="2560"
+   inkscape:window-height="1367"
+   inkscape:window-x="0"
+   inkscape:window-y="42"
+   inkscape:window-maximized="1"
+   inkscape:current-layer="svg1139" />
+    <g
+   id="primtype_capsule"
+   transform="translate(0.012,0.1835)">
+        <g
+   id="RoundEnds">
+            <path
+   d="m 6.114,9.757 c 1.4,1.385 1.4,3.635 0,5.02 -1.401,1.386 -3.675,1.386 -5.076,0 -1.4,-1.385 -1.4,-3.635 0,-5.02 1.401,-1.386 3.675,-1.386 5.076,0 z"
+   style="fill:#4c6582"
+   id="path1129" />
+            <path
+   d="m 14.938,0.855 c 1.4,1.385 1.4,3.633 0,5.018 -1.399,1.385 -3.672,1.385 -5.072,0 -1.4,-1.385 -1.4,-3.633 0,-5.018 1.4,-1.385 3.673,-1.385 5.072,0 z"
+   style="fill:#4c6582"
+   id="path1131" />
+        </g>
+        <path
+   d="M 0.928,9.87 9.897,0.825 14.904,5.906 5.933,14.944 Z"
+   style="fill:#4c6582"
+   id="path1134" />
+        <path
+   d="m 0.688,11.852 c 0,0.758 0.532,1.877 1.282,1.982 1.579,0.222 2.564,-0.823 2.564,-0.823 L 13.106,4.81 c 0,0 1.92,-2.278 0.126,-3.741 -1.358,-1.107 -3.071,0 -3.071,0 l -8.878,9.069 c 0,0 -0.595,0.543 -0.595,1.714 z"
+   style="fill:#a0adbd"
+   id="path1136" />
+    </g>
+</svg>

@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import uploads
+from .scene_graph import SceneGraph, SceneGraphError
 from .usd_to_glb import CONVERTER_VERSION, PURPOSES, ConversionError, convert, dependency_report
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -42,15 +43,20 @@ _convert_lock = threading.Lock()
 app = FastAPI(title="USD Viewer")
 
 
+Variants = dict[str, dict[str, str]]
+
+
 class ConvertRequest(BaseModel):
     root: str | None = None
     purpose: str = "render"
+    variants: Variants | None = None  # {prim path: {variant set: selection}}
 
 
 class OpenPathRequest(BaseModel):
     path: str
     root: str | None = None  # when `path` is a folder: root layer relative to it
     purpose: str = "render"
+    variants: Variants | None = None
 
 
 def _purpose(value: str) -> str:
@@ -192,6 +198,11 @@ def _strip_base(text: str, base: Path) -> str:
     return text
 
 
+def _variant_key(variants: Variants | None) -> str:
+    """A stable text form of variant overrides, for scene ids ("" when none)."""
+    return json.dumps(variants, sort_keys=True, separators=(",", ":")) if variants else ""
+
+
 def _cached_report(scene_id: str) -> dict | None:
     scene_dir = SCENES / scene_id
     report_path = scene_dir / "report.json"
@@ -202,12 +213,12 @@ def _cached_report(scene_id: str) -> dict | None:
 
 
 def _convert_and_store(scene_id: str, root_path: str, purpose: str, base: Path | None, extra: dict,
-                       deps: dict | None = None) -> dict:
+                       deps: dict | None = None, variants: Variants | None = None) -> dict:
     """Convert root_path, write the GLB + report under SCENES/scene_id."""
     started = time.perf_counter()
     with _convert_lock:
         try:
-            glb_bytes, info = convert(root_path, purpose)
+            glb_bytes, info = convert(root_path, purpose, variants)
         except ConversionError as exc:
             raise HTTPException(422, str(exc))
         if deps is None:
@@ -256,12 +267,13 @@ def convert_upload(upload_id: str, body: ConvertRequest):
         raise HTTPException(400, f"'{root}' is not a USD file in this upload")
 
     purpose = _purpose(body.purpose)
-    scene_id = hashlib.sha256(f"{upload_id}:{rel}:{purpose}:{CONVERTER_VERSION}".encode()).hexdigest()[:24]
+    vkey = _variant_key(body.variants)
+    scene_id = hashlib.sha256(f"{upload_id}:{rel}:{purpose}:{vkey}:{CONVERTER_VERSION}".encode()).hexdigest()[:24]
     cached = _cached_report(scene_id)
     if cached is not None:
         return JSONResponse(cached)
     extra = {"source": "upload", "uploadId": upload_id, "root": rel}
-    return _convert_and_store(scene_id, str(files_dir / rel), purpose, files_dir, extra)
+    return _convert_and_store(scene_id, str(files_dir / rel), purpose, files_dir, extra, variants=body.variants)
 
 
 def _fingerprint(paths: list[str]) -> str:
@@ -311,7 +323,9 @@ def open_path(body: OpenPathRequest, request: Request):
 
     deps = dependency_report(str(root_path))
     fp = _fingerprint([str(root_path), *deps["layers"], *deps["assets"]])
-    scene_id = hashlib.sha256(f"path:{root_path}:{purpose}:{fp}:{CONVERTER_VERSION}".encode()).hexdigest()[:24]
+    vkey = _variant_key(body.variants)
+    scene_id = hashlib.sha256(
+        f"path:{root_path}:{purpose}:{vkey}:{fp}:{CONVERTER_VERSION}".encode()).hexdigest()[:24]
     cached = _cached_report(scene_id)
     if cached is not None:
         return JSONResponse(cached)
@@ -322,7 +336,7 @@ def open_path(body: OpenPathRequest, request: Request):
         "folder": target.as_posix() if target.is_dir() else None,
         "rootCandidates": candidates,
     }
-    return _convert_and_store(scene_id, str(root_path), purpose, None, extra, deps)
+    return _convert_and_store(scene_id, str(root_path), purpose, None, extra, deps, body.variants)
 
 
 @app.get("/api/scenes/{scene_id}/scene.glb")
@@ -335,6 +349,61 @@ def get_scene(scene_id: str):
     return FileResponse(path, media_type="model/gltf-binary")
 
 
+def _scene_graph(scene_id: str) -> SceneGraph:
+    """The composed stage behind a converted scene, for the scene graph panel."""
+    if not scene_id.isalnum():
+        raise HTTPException(400, "Invalid scene id")
+    report_path = SCENES / scene_id / "report.json"
+    if not report_path.is_file():
+        raise HTTPException(404, "Scene not found (it may have expired); open it again")
+    report = json.loads(report_path.read_text())
+    display = None
+    if report.get("source") == "path":
+        root_path = report["path"]
+    elif report.get("source") == "upload":
+        base = _upload_dir(report["uploadId"])
+        root_path = str(base / report["root"])
+        display = lambda p: _relpath(p, base)  # noqa: E731
+    else:
+        raise HTTPException(404, "This scene has no USD stage")
+    try:
+        return SceneGraph(scene_id, root_path, display, report.get("variants") or None)
+    except SceneGraphError as exc:
+        raise HTTPException(exc.status, exc.message)
+
+
+def _graph_call(scene_id: str, fn):
+    graph = _scene_graph(scene_id)
+    try:
+        return fn(graph)
+    except SceneGraphError as exc:
+        raise HTTPException(exc.status, exc.message)
+
+
+@app.get("/api/scenes/{scene_id}/prims")
+def scene_children(scene_id: str, path: str = "/"):
+    """One level of the prim hierarchy: the children of `path`."""
+    return _graph_call(scene_id, lambda g: g.children(path))
+
+
+@app.get("/api/scenes/{scene_id}/subtree")
+def scene_subtree(scene_id: str, path: str = "/"):
+    """Every level beneath `path`, breadth first, for expand-all."""
+    return _graph_call(scene_id, lambda g: g.subtree(path))
+
+
+@app.get("/api/scenes/{scene_id}/reveal")
+def scene_reveal(scene_id: str, path: str):
+    """The levels from the root down to `path`, to open the tree onto a picked prim."""
+    return _graph_call(scene_id, lambda g: g.reveal(path))
+
+
+@app.get("/api/scenes/{scene_id}/prim")
+def scene_prim(scene_id: str, path: str):
+    """One prim's detail: variants, schemas, property counts and opinions."""
+    return _graph_call(scene_id, lambda g: g.detail(path))
+
+
 @app.get("/api/health")
 def health(request: Request):
     from pxr import Usd
@@ -345,6 +414,16 @@ def health(request: Request):
         "converter": CONVERTER_VERSION,
         "localPaths": _local_paths_allowed(request),
     }
+
+
+@app.middleware("http")
+async def revalidate_static(request: Request, call_next):
+    """The viewer's own files change with every update: make browsers check them
+    (a cheap 304 via ETag) instead of running yesterday's JavaScript from cache."""
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/") and "cache-control" not in response.headers:
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")

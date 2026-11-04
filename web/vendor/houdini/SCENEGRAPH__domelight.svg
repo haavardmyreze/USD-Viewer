@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="100%"
+   height="100%"
+   viewBox="0 0 16 16"
+   version="1.1"
+   xml:space="preserve"
+   style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"
+   id="svg2221"
+   sodipodi:docname="domelight.svg"
+   inkscape:version="1.2.1 (9c6d41e, 2022-07-14)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"><defs
+   id="defs2225" /><sodipodi:namedview
+   id="namedview2223"
+   pagecolor="#ffffff"
+   bordercolor="#000000"
+   borderopacity="0.25"
+   inkscape:showpageshadow="2"
+   inkscape:pageopacity="0.0"
+   inkscape:pagecheckerboard="0"
+   inkscape:deskcolor="#d1d1d1"
+   showgrid="false"
+   inkscape:zoom="64.1875"
+   inkscape:cx="8"
+   inkscape:cy="7.9922103"
+   inkscape:window-width="2560"
+   inkscape:window-height="1367"
+   inkscape:window-x="0"
+   inkscape:window-y="42"
+   inkscape:window-maximized="1"
+   inkscape:current-layer="svg2221" />
+    <g
+   id="domelight"
+   transform="translate(0.118)">
+        <path
+   d="m -0.118,10.816 c 0,0 0.325,-10 8,-10 7.675,0 8,10 8,10 l -8,2 z m 1.068,-0.763 6.932,1.733 c 0,0 6.932,-1.733 6.932,-1.734 C 14.711,9.174 14.456,7.688 13.837,6.201 12.932,4.027 11.219,1.816 7.882,1.816 4.545,1.816 2.832,4.027 1.927,6.201 1.308,7.688 1.053,9.174 0.95,10.053 Z"
+   style="fill:#ffdf94"
+   id="path2214" />
+        <ellipse
+   cx="7.882"
+   cy="11.316"
+   rx="8"
+   ry="3.5"
+   style="fill:#fff2d5"
+   id="ellipse2216" />
+        <path
+   d="m 7.882,7.816 c 4.415,0 8,1.569 8,3.5 0,1.932 -3.585,3.5 -8,3.5 -4.415,0 -8,-1.568 -8,-3.5 0,-1.931 3.585,-3.5 8,-3.5 z m 0,1 c -2.437,0 -4.604,0.493 -5.943,1.293 -0.604,0.36 -1.057,0.727 -1.057,1.207 0,0.481 0.453,0.848 1.057,1.208 1.339,0.799 3.506,1.292 5.943,1.292 2.437,0 4.604,-0.493 5.943,-1.292 0.604,-0.36 1.057,-0.727 1.057,-1.208 0,-0.48 -0.453,-0.847 -1.057,-1.207 -1.339,-0.8 -3.506,-1.293 -5.943,-1.293 z"
+   style="fill:#ffc235"
+   id="path2218" />
+    </g>
+</svg>

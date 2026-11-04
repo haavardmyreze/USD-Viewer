@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { Viewer } from './viewer.js';
+import { SceneGraph } from './scenegraph.js';
 import {
   convertUpload, filesFromDrop, filesFromInput, getHealth, getUpload, isDirectGltf, openPath, uploadFiles,
 } from './upload.js';
@@ -10,6 +11,9 @@ const viewer = new Viewer($('viewport'));
 // source: 'upload' (files sent to the server), 'path' (read in place) or 'file' (a dropped .glb)
 let current = { source: null, uploadId: null, path: null, root: null };
 let purpose = 'render';
+/** Variant selection overrides for the open scene: { prim path: { set: variant } }. */
+let variants = {};
+let report = null;
 let localPaths = false;
 let busy = false;
 
@@ -61,11 +65,12 @@ function setLoading(step, { detail = '', progress = null } = {}) {
 const hideLoading = () => { $('loading').hidden = true; };
 
 let toastTimer = 0;
-function toast(message) {
+function toast(message, kind = 'error') {
   $('toast-text').textContent = message;
   $('toast').hidden = false;
+  $('toast').classList.toggle('ok', kind === 'ok');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { $('toast').hidden = true; }, 12000);
+  toastTimer = setTimeout(() => { $('toast').hidden = true; }, kind === 'ok' ? 2500 : 12000);
 }
 $('toast-close').addEventListener('click', () => { $('toast').hidden = true; });
 
@@ -90,6 +95,9 @@ function showSceneChrome() {
   $('welcome').hidden = true;
   $('topbar').hidden = false;
   $('inspector').hidden = false;
+  $('btn-graph').hidden = current.source === 'file';
+  if (current.source !== 'file' && store.get('usdv.graph', false) && $('graph').hidden) setGraph(true);
+  if (current.source === 'file' && !$('graph').hidden) setGraph(false);
   $('hud').hidden = false;
   if (!store.get('usdv.hintSeen', false)) $('nav-hint').hidden = false;
 }
@@ -213,14 +221,19 @@ function showReport(report) {
   list($('layers-list'), layers);
 }
 
-function showRoots(candidates, all, selected) {
-  const options = all.length > 1 ? all : [];
-  $('root-field').hidden = options.length === 0;
-  const set = new Set(candidates);
-  $('root-select').replaceChildren(...[...candidates, ...options.filter((o) => !set.has(o))].map((f) => {
+/**
+ * Root layer choices: the pipeline's assemblies, as usd-refgraph lists them
+ * (shot roots, then sets, then assets; the server decides). A root opened some
+ * other way (a link, a recent entry) stays listed so the selector shows it.
+ */
+function showRoots(candidates, selected) {
+  const options = [...candidates];
+  if (selected && !options.includes(selected)) options.push(selected);
+  $('root-field').hidden = options.length < 2;
+  $('root-select').replaceChildren(...options.map((f) => {
     const o = document.createElement('option');
     o.value = f;
-    o.textContent = set.has(f) ? f : `${f}  (referenced by another layer)`;
+    o.textContent = candidates.includes(f) ? f : `${f}  (not an assembly)`;
     return o;
   }));
   if (selected) $('root-select').value = selected;
@@ -238,52 +251,156 @@ function updateHash() {
   }
   if (current.root) params.set('root', current.root);
   if (purpose !== 'render') params.set('purpose', purpose);
+  if (Object.keys(variants).length) params.set('variants', JSON.stringify(variants));
   history.replaceState(null, '', `#${params}`);
 }
 
-async function loadReport(report) {
+/**
+ * `same`: the same scene re-composed (another variant or purpose): keep the
+ * camera, the scene graph's open branches and the selection.
+ */
+async function loadReport(next, { same = false } = {}) {
+  report = next;
   updateHash();
-  const label = basename(report.root);
-  setLoading(`Downloading ${label}`, { detail: fmtBytes(report.glbBytes), progress: 0 });
-  await viewer.loadGlb(report.glbUrl, (p) => setLoading(`Downloading ${label}`, {
-    detail: `${fmtBytes(report.glbBytes * p)} of ${fmtBytes(report.glbBytes)}`, progress: p,
-  }));
+  const label = basename(next.root);
+  const progress = (p) => setLoading(`Downloading ${label}`, {
+    detail: `${fmtBytes(next.glbBytes * p)} of ${fmtBytes(next.glbBytes)}`, progress: p,
+  });
+  if (!same) progress(0);
+  await viewer.loadGlb(next.glbUrl, same ? undefined : progress, { keepView: same && !!viewer.model });
   showSceneChrome();
-  showReport(report);
+  showReport(next);
+  graph.setScene(next.sceneId, { keep: same });
+  renderVariants();
+  viewer.select(graph.selection);
   hideLoading();
 }
 
-async function convertAndLoad(uploadId, root) {
-  setLoading(`Converting ${basename(root)}`, { detail: 'Composing the stage with OpenUSD…' });
-  const report = await convertUpload(uploadId, root, purpose);
-  current = { source: 'upload', uploadId, path: null, root: report.root };
-  remember({ type: 'upload', uploadId, root: report.root, name: basename(report.root) });
-  await loadReport(report);
+/** What changed since the last load decides whether to keep the view. */
+function sameScene(source, key) {
+  return current.source === source && current.key === key;
+}
+
+async function convertAndLoad(uploadId, root, { quiet = false } = {}) {
+  const same = sameScene('upload', `${uploadId}:${root}`);
+  if (!same) variants = {};
+  if (!quiet) setLoading(`Converting ${basename(root)}`, { detail: 'Composing the stage with OpenUSD…' });
+  const next = await convertUpload(uploadId, root, purpose, nonEmpty(variants));
+  current = { source: 'upload', uploadId, path: null, root: next.root, key: `${uploadId}:${root}` };
+  remember({ type: 'upload', uploadId, root: next.root, name: basename(next.root) });
+  await loadReport(next, { same });
 }
 
 async function restoreUpload(uploadId, root) {
   setLoading('Opening upload');
   const summary = await getUpload(uploadId);
-  showRoots(summary.rootCandidates, summary.usdFiles, root || summary.root);
+  showRoots(summary.rootCandidates, root || summary.root);
   await convertAndLoad(uploadId, root || summary.root);
 }
 
-async function openPathAndLoad(path, root = null) {
-  setLoading(`Converting ${basename(root || path)}`, { detail: 'Composing the stage with OpenUSD…' });
-  const report = await openPath(path, root, purpose);
-  current = { source: 'path', uploadId: null, path, root: report.folder ? report.root : null };
-  if (report.folder) showRoots(report.rootCandidates, report.rootCandidates, report.root);
+async function openPathAndLoad(path, root = null, { quiet = false, withVariants = null } = {}) {
+  const same = sameScene('path', `${path}:${root}`);
+  if (!same) variants = withVariants ?? {};
+  if (!quiet) setLoading(`Converting ${basename(root || path)}`, { detail: 'Composing the stage with OpenUSD…' });
+  const next = await openPath(path, root, purpose, nonEmpty(variants));
+  current = { source: 'path', uploadId: null, path, root: next.folder ? next.root : null, key: `${path}:${root}` };
+  if (next.folder) showRoots(next.rootCandidates, next.root);
   else $('root-field').hidden = true;
   $('path-input').value = path;
-  remember({ type: 'path', path, root: current.root, name: basename(report.root) });
-  await loadReport(report);
+  remember({ type: 'path', path, root: current.root, name: basename(next.root) });
+  await loadReport(next, { same });
 }
 
-/** Convert the current scene again (after switching purpose). */
-function reloadCurrent() {
-  if (current.source === 'upload') return run(() => convertAndLoad(current.uploadId, current.root));
-  if (current.source === 'path') return run(() => openPathAndLoad(current.path, current.root));
+const nonEmpty = (v) => (Object.keys(v).length ? v : null);
+
+/** Convert the current scene again (after switching purpose or a variant). */
+function reloadCurrent(options = {}) {
+  if (current.source === 'upload') return run(() => convertAndLoad(current.uploadId, current.root, options));
+  if (current.source === 'path') return run(() => openPathAndLoad(current.path, current.root, options));
   return null;
+}
+
+// -- variants ---------------------------------------------------------------------------
+
+/** Re-compose with one variant selection changed; the files on disk are not touched. */
+function setVariant(primPath, set, value) {
+  if (busy || !report) return;
+  variants = { ...variants, [primPath]: { ...(variants[primPath] || {}), [set]: value } };
+  // the converted result is cached per selection, so most switches are quick:
+  // show progress in place and only bring up the loading card if it takes a while
+  setVariantBusy(true);
+  const slow = setTimeout(() => setLoading(`Switching ${set} to ${value}`, { detail: 'Composing the stage with OpenUSD…' }), 700);
+  const done = reloadCurrent({ quiet: true });
+  Promise.resolve(done).finally(() => {
+    clearTimeout(slow);
+    setVariantBusy(false);
+  });
+}
+
+function setVariantBusy(on) {
+  for (const chip of $('variants').querySelectorAll('.vchip')) chip.classList.toggle('busy', on);
+  for (const c of $('variants').querySelectorAll('select, button')) c.disabled = on;
+  graph.setBusy(on);
+}
+
+/** Step the default prim's variant set `index` by `delta`, wrapping around. */
+function cycleVariant(index = lastVariantSet, delta = 1) {
+  const dv = report?.defaultVariants;
+  const set = dv?.sets[index];
+  if (!set) return;
+  lastVariantSet = index;
+  const at = Math.max(0, set.options.indexOf(set.selection));
+  const value = set.options[(at + delta + set.options.length) % set.options.length];
+  setVariant(dv.prim, set.name, value);
+}
+let lastVariantSet = 0;
+
+const CHEVRON_LEFT = '<svg viewBox="0 0 24 24"><path d="m14.5 6-6 6 6 6"/></svg>';
+const CHEVRON_RIGHT = '<svg viewBox="0 0 24 24"><path d="m9.5 6 6 6-6 6"/></svg>';
+
+/** The default prim's variant sets in the top bar, each with previous / next. */
+function renderVariants() {
+  const dv = report?.defaultVariants;
+  const host = $('variants');
+  host.hidden = !dv;
+  if (!dv) {
+    host.replaceChildren();
+    return;
+  }
+  if (lastVariantSet >= dv.sets.length) lastVariantSet = 0;
+  host.replaceChildren(...dv.sets.map((set, index) => {
+    const chip = document.createElement('div');
+    chip.className = 'vchip';
+    chip.title = `Variant set "${set.name}" on ${dv.prim}. [ and ] cycle it.`;
+    const name = document.createElement('span');
+    name.className = 'vname';
+    name.textContent = set.name;
+    const prev = document.createElement('button');
+    prev.type = 'button';
+    prev.innerHTML = CHEVRON_LEFT;
+    prev.title = 'Previous variant ([)';
+    prev.addEventListener('click', () => cycleVariant(index, -1));
+    const select = document.createElement('select');
+    select.setAttribute('aria-label', `Variant set ${set.name}`);
+    select.replaceChildren(...set.options.map((option) => {
+      const o = document.createElement('option');
+      o.value = option;
+      o.textContent = option;
+      return o;
+    }));
+    select.value = set.selection ?? '';
+    select.addEventListener('change', () => {
+      lastVariantSet = index;
+      setVariant(dv.prim, set.name, select.value);
+    });
+    const next = document.createElement('button');
+    next.type = 'button';
+    next.innerHTML = CHEVRON_RIGHT;
+    next.title = 'Next variant (])';
+    next.addEventListener('click', () => cycleVariant(index, 1));
+    chip.append(name, prev, select, next);
+    return chip;
+  }));
 }
 
 async function run(task) {
@@ -313,10 +430,14 @@ function openFiles(files) {
         URL.revokeObjectURL(url);
       }
       current = { source: 'file', uploadId: null, path: files[0].path, root: null };
+      report = null;
+      variants = {};
       $('root-field').hidden = true;
       updateHash();
       showSceneChrome();
       showReport(null);
+      graph.setScene(null);
+      renderVariants();
       hideLoading();
       return;
     }
@@ -326,7 +447,7 @@ function openFiles(files) {
     const summary = await uploadFiles(files, (p) => setLoading(label, {
       detail: `${fmtBytes(total * p)} of ${fmtBytes(total)}`, progress: p,
     }));
-    showRoots(summary.rootCandidates, summary.usdFiles, summary.root);
+    showRoots(summary.rootCandidates, summary.root);
     await convertAndLoad(summary.uploadId, summary.root);
   });
 }
@@ -336,7 +457,11 @@ async function restoreFromHash() {
   setPurpose(params.get('purpose') === 'proxy' ? 'proxy' : 'render');
   const uploadId = params.get('upload');
   const path = params.get('path');
-  if (path) await run(() => openPathAndLoad(path, params.get('root')));
+  let wanted = {};
+  try { wanted = JSON.parse(params.get('variants') || '{}') || {}; } catch { /* ignore a bad link */ }
+  const key = path ? `${path}:${params.get('root')}` : `${uploadId}:${params.get('root')}`;
+  if (current.key === key && JSON.stringify(wanted) === JSON.stringify(variants)) return; // already showing it
+  if (path) await run(() => openPathAndLoad(path, params.get('root'), { withVariants: wanted }));
   else if (uploadId) await run(() => restoreUpload(uploadId, params.get('root')));
 }
 
@@ -352,6 +477,46 @@ function togglePurpose() {
   if (busy) return;
   setPurpose(purpose === 'proxy' ? 'render' : 'proxy');
   if (!reloadCurrent()) updateHash();
+}
+
+// -- scene graph ------------------------------------------------------------------------
+
+const graph = new SceneGraph($('graph-body'), {
+  onSelect: (sel) => viewer.select(sel),
+  onFrame: (path) => {
+    if (!viewer.frameSelection({ path, instance: graph.selection?.path === path ? graph.selection.instance : null })) {
+      toast('Nothing under this prim is drawn in the view', 'ok');
+    }
+  },
+  onToast: (message, kind) => toast(message, kind),
+  geometry: (sel) => viewer.selection.geometry(sel),
+  onVariant: (path, set, value) => setVariant(path, set, value),
+});
+
+function setGraph(open) {
+  $('graph').hidden = !open;
+  document.body.classList.toggle('graph-open', open);
+  $('btn-graph').setAttribute('aria-pressed', String(open));
+  store.set('usdv.graph', open);
+  if (open) graph.activate();
+  else graph.deactivate();
+}
+
+/** Select from the 3D view (or clear with null); the tree opens onto the prim. */
+function selectFromView(hit) {
+  if (!hit) {
+    viewer.select(null);
+    void graph.reveal(null);
+    return;
+  }
+  const sel = { path: hit.path, instance: hit.instance ?? null };
+  viewer.select(sel);
+  void graph.reveal(sel.path, sel.instance);
+}
+
+function frame() {
+  const sel = graph.selection;
+  if (!sel || !viewer.frameSelection(sel)) viewer.frameScene();
 }
 
 const settings = store.get('usdv.settings', {});
@@ -429,7 +594,23 @@ $('root-select').addEventListener('change', (e) => {
 $('btn-open').addEventListener('click', showOpen);
 $('welcome-close').addEventListener('click', hideOpen);
 $('welcome').addEventListener('pointerdown', (e) => { if (e.target === $('welcome')) hideOpen(); });
-$('btn-frame').addEventListener('click', () => viewer.frameScene());
+$('btn-frame').addEventListener('click', frame);
+$('btn-graph').addEventListener('click', () => setGraph($('graph').hidden));
+$('graph-close').addEventListener('click', () => setGraph(false));
+
+// click (not drag) in the view selects what is under the cursor
+let pressAt = null;
+$('viewport').addEventListener('pointerdown', (e) => {
+  pressAt = e.button === 0 && !e.shiftKey ? { x: e.clientX, y: e.clientY, t: performance.now() } : null;
+});
+$('viewport').addEventListener('pointerup', (e) => {
+  const p = pressAt;
+  pressAt = null;
+  if (!p || e.button !== 0 || !viewer.model || !graph.sceneId) return;
+  if (Math.hypot(e.clientX - p.x, e.clientY - p.y) > 4 || performance.now() - p.t > 400) return;
+  const rect = $('viewport').getBoundingClientRect();
+  selectFromView(viewer.pickObject(e.clientX - rect.left, e.clientY - rect.top));
+});
 $('btn-proxy').addEventListener('click', togglePurpose);
 $('btn-inspector').addEventListener('click', () => setInspector(document.body.classList.contains('no-inspector')));
 $('btn-help').addEventListener('click', () => { $('help').hidden = false; });
@@ -446,13 +627,24 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (!$('help').hidden) $('help').hidden = true;
     else if (!$('welcome').hidden) hideOpen();
+    else if (graph.selection) selectFromView(null);
     return;
   }
-  if (isTyping(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (isTyping(e)) return;
+  // brackets by character: their key differs between layouts (AltGr+8/9 on Nordic
+  // keyboards, which arrives with Ctrl+Alt held)
+  if ((e.key === '[' || e.key === ']') && viewer.model && $('welcome').hidden) {
+    cycleVariant(lastVariantSet, e.key === ']' ? 1 : -1);
+    e.preventDefault();
+    return;
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (!$('welcome').hidden && !viewer.model) return;
   const click = (id) => $(id).click();
   switch (e.code) {
-    case 'KeyF': viewer.frameScene(); break;
+    case 'KeyF': frame(); break;
+    case 'KeyT': if (graph.sceneId) setGraph($('graph').hidden); break;
+
     case 'KeyG': click('opt-grid'); break;
     case 'KeyL': click('opt-shadows'); break;
     case 'KeyB': click('opt-double'); break;
@@ -557,3 +749,4 @@ getHealth().then((h) => {
 });
 
 window.usdViewer = viewer; // debugging handle
+window.usdGraph = graph;

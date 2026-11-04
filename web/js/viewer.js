@@ -4,6 +4,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { Navigation } from './navigation.js';
 import { HELPER_LAYER, Picker } from './picking.js';
 import { LodManager } from './lod.js';
+import { Selection } from './selection.js';
 import { applyTriplanarToScene } from './triplanar.js';
 
 const SUN_DIRECTION = new THREE.Vector3(0.55, 0.7, 0.4).normalize();
@@ -54,6 +55,7 @@ export class Viewer {
     this.nav = new Navigation(this.camera, canvas, (x, y) => this.pick(x, y));
     this.nav.lookAt(new THREE.Vector3());
     this.lod = new LodManager();
+    this.selection = new Selection(this.lod);
 
     this.model = null;
     this.bounds = new THREE.Box3(new THREE.Vector3(-5, 0, -5), new THREE.Vector3(5, 2, 5));
@@ -82,17 +84,23 @@ export class Viewer {
 
   // -- loading ---------------------------------------------------------------
 
-  async loadGlb(url, onProgress) {
+  /**
+   * @param options.keepView  keep the camera where it is (e.g. after switching a
+   *                          variant), instead of framing the new model
+   */
+  async loadGlb(url, onProgress, options = {}) {
     const gltf = await this.loader.loadAsync(url, (e) => {
       if (e.lengthComputable) onProgress?.(e.loaded / e.total);
     });
     for (const s of gltf.scenes) applyTriplanarToScene(s);
-    this.setModel(gltf);
+    await resolveInstanceIds(gltf);
+    this.setModel(gltf, options);
     return gltf;
   }
 
-  setModel(gltf) {
+  setModel(gltf, { keepView = false } = {}) {
     if (this.model) {
+      this.selection.clear();
       this.scene.remove(this.model);
       disposeObject(this.model);
     }
@@ -113,6 +121,10 @@ export class Viewer {
     this.scene.add(model);
     model.updateMatrixWorld(true);
     this.lod.setup(model);
+    const pickable = [];
+    model.traverse((o) => { if (o.isMesh) pickable.push(o); });
+    this.picker.register(pickable);
+    this.selection.build(model);
 
     // bounds: plain meshes + every managed instance (ignores the LOD copies)
     const managed = new Set(this.lod.groups.flatMap((g) => g.levels.flat()));
@@ -138,7 +150,7 @@ export class Viewer {
     this._placeHelpers();
     this._placeSun();
     this.setDoubleSided(this.options.doubleSided);
-    this.frameScene(false);
+    if (!keepView) this.frameScene(false);
     this.nav.update(0);
     this._warmUp();
     this.invalidate();
@@ -157,16 +169,45 @@ export class Viewer {
 
   /** Camera pose that shows the whole scene from a three-quarter view. */
   frameScene(animate = true) {
-    const center = this.bounds.getCenter(new THREE.Vector3());
+    const dir = new THREE.Vector3(0.62, 0.42, 1).normalize();
+    this._frameSphere(this.bounds.getCenter(new THREE.Vector3()), this.radius, dir, animate ? 0.6 : 0, 0.9);
+  }
+
+  /** Fly to a selection ({ path, instance? }), keeping the viewing direction. */
+  frameSelection(sel, animate = true) {
+    const box = this.selection.bounds(sel);
+    if (!box) return false;
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    const dir = this.camera.getWorldDirection(new THREE.Vector3()).negate();
+    this._frameSphere(sphere.center, Math.max(sphere.radius, this.radius * 1e-4), dir, animate ? 0.5 : 0, 1.15);
+    return true;
+  }
+
+  _frameSphere(center, radius, dir, duration, margin) {
     const fov = THREE.MathUtils.degToRad(this.camera.fov);
     const aspect = Number.isFinite(this.camera.aspect) && this.camera.aspect > 0 ? this.camera.aspect : 1.6;
-    const fitH = this.radius / Math.sin(fov / 2);
-    const fitW = this.radius / Math.sin(Math.atan(Math.tan(fov / 2) * aspect));
-    const dist = Math.max(fitH, fitW) * 0.9;
-    const dir = new THREE.Vector3(0.62, 0.42, 1).normalize();
-    const pos = center.clone().addScaledVector(dir, dist);
-    this.nav.flyTo(pos, center, animate ? 0.6 : 0);
+    const fitH = radius / Math.sin(fov / 2);
+    const fitW = radius / Math.sin(Math.atan(Math.tan(fov / 2) * aspect));
+    const dist = Math.max(fitH, fitW) * margin;
+    this.nav.flyTo(center.clone().addScaledVector(dir, dist), center, duration);
     this.invalidate();
+  }
+
+  /** Highlight a selection ({ path, instance? }) or nothing (null). */
+  select(sel) {
+    this.selection.set(sel);
+    this.selection.sync();
+    this.invalidate();
+  }
+
+  /** The prim under canvas pixel (x, y): { path, instance, proto, point } or null. */
+  pickObject(x, y) {
+    if (!this.model) return null;
+    this.camera.updateMatrixWorld();
+    const hit = this.picker.pickObject(this.scene, this.camera, x, y);
+    if (!hit?.object) return null;
+    const info = this.selection.describe(hit.object, hit.slot);
+    return info ? { ...info, point: hit.point } : null;
   }
 
   /** World point under canvas pixel (x, y), or null. */
@@ -208,7 +249,7 @@ export class Viewer {
   setDoubleSided(on) {
     this.options.doubleSided = on;
     this.model?.traverse((o) => {
-      if (!o.isMesh) return;
+      if (!o.isMesh || o.userData.usdvOverlay) return;
       for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
         if (!this._originalSides.has(m)) this._originalSides.set(m, m.side);
         m.side = on ? THREE.DoubleSide : this._originalSides.get(m);
@@ -397,6 +438,7 @@ export class Viewer {
     if (this._shadowsDirty && this.options.shadows && this.model) this._renderShadows();
     const detail = DETAIL_LEVELS[this.options.detail] ?? 1;
     this.lod.update(this.camera, refine ? Math.max(detail * 2, 2) : detail);
+    this.selection.sync();
     this.renderer.render(this.scene, this.camera);
 
     this.lastFrame = { triangles: this.renderer.info.render.triangles, refined: refine };
@@ -406,6 +448,28 @@ export class Viewer {
     if (refine) this._needsRefine = false;
     this.onFrame?.(true);
   }
+}
+
+/**
+ * Instance -> authored PointInstancer index tables are glTF accessors named in
+ * node extras (usdInstanceIds); swap each index for its loaded Float32Array.
+ */
+async function resolveInstanceIds(gltf) {
+  const pending = new Map();
+  const nodes = [];
+  for (const s of gltf.scenes) {
+    s.traverse((o) => {
+      if (typeof o.userData?.usdInstanceIds === 'number') nodes.push(o);
+    });
+  }
+  for (const o of nodes) {
+    const index = o.userData.usdInstanceIds;
+    if (!pending.has(index)) pending.set(index, gltf.parser.getDependency('accessor', index));
+  }
+  await Promise.all(nodes.map(async (o) => {
+    const attr = await pending.get(o.userData.usdInstanceIds);
+    o.userData.usdInstanceIds = attr?.array instanceof Float32Array ? attr.array : null;
+  }));
 }
 
 function disposeObject(root) {

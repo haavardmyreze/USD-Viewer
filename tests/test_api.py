@@ -127,3 +127,63 @@ def test_open_path(client, scene_dir, monkeypatch):
     assert client.post("/api/open", json={"path": str(scene_dir / "nope.usda")}).status_code == 404
     assert client.post("/api/open", json={"path": str(scene_dir), "purpose": "guide"}).status_code == 400
     assert client.post("/api/open", json={"path": str(scene_dir), "root": "../../etc/passwd"}).status_code == 400
+
+
+def _uploaded(client, scene_dir, **body):
+    files, paths = _multipart(scene_dir, prefix="my_scene/")
+    summary = client.post("/api/uploads", files=files, data={"paths": [p for _, p in paths]}).json()
+    res = client.post(f"/api/uploads/{summary['uploadId']}/convert", json=body)
+    assert res.status_code == 200, res.text
+    return res.json()
+
+
+def test_scene_graph_api(client, scene_dir):
+    report = _uploaded(client, scene_dir)
+    base = f"/api/scenes/{report['sceneId']}"
+
+    top = client.get(f"{base}/prims", params={"path": "/"}).json()
+    assert top["defaultPrim"] == "/World"
+    assert [p["name"] for p in top["children"]] == ["World"]
+
+    world = {p["name"]: p for p in client.get(f"{base}/prims", params={"path": "/World"}).json()["children"]}
+    tower = world["Tower"]
+    assert tower["arcs"] == ["payload"] and tower["variants"] == {"color": "sand"}
+    assert "unloaded" not in tower  # payloads are loaded, like the conversion
+    assert world["Crates"]["childCount"] == 9
+
+    subtree = client.get(f"{base}/subtree", params={"path": "/World"}).json()
+    assert not subtree["truncated"] and subtree["prims"] > 10
+
+    # opening the tree onto a prim picked in 3D: every level down to its parent
+    reveal = client.get(f"{base}/reveal", params={"path": "/World/Crates/crate_2_2/geo"}).json()
+    assert [lvl["primPath"] for lvl in reveal["levels"]] == ["/", "/World", "/World/Crates", "/World/Crates/crate_2_2"]
+    proxy = reveal["levels"][-1]["children"][0]
+    assert proxy["instanceProxy"] is True
+
+    detail = client.get(f"{base}/prim", params={"path": "/World/Tower"}).json()
+    assert detail["variantSets"] == [{"name": "color", "selection": "sand", "options": ["sand", "stone"]}]
+    layers = [(o["layerPath"], o["arc"]) for o in detail["opinions"]]
+    # strongest first; paths relative to the upload rather than server storage
+    assert ("my_scene/layers/layout.usda", "sublayer") in layers
+    assert ("my_scene/assets/tower.usda", "payload") in layers
+
+    assert client.get(f"{base}/prim", params={"path": "/World/Nope"}).status_code == 404
+    assert client.get(f"{base}/prim", params={"path": "not a path"}).status_code == 400
+    assert client.get("/api/scenes/doesnotexist/prims").status_code == 404
+
+
+def test_variants_recompose_the_scene(client, scene_dir):
+    plain = _uploaded(client, scene_dir)
+    sand = _uploaded(client, scene_dir, variants={"/World/Tower": {"color": "stone"}})
+    assert sand["sceneId"] != plain["sceneId"]
+    assert sand["variants"] == {"/World/Tower": {"color": "stone"}}
+    assert plain["defaultVariants"] is None  # /World has no variant sets
+    # the scene graph shows the stage as converted, with the override applied
+    detail = client.get(f"/api/scenes/{sand['sceneId']}/prim", params={"path": "/World/Tower"}).json()
+    assert detail["variantSets"][0]["selection"] == "stone"
+    again = _uploaded(client, scene_dir, variants={"/World/Tower": {"color": "stone"}})
+    assert again["sceneId"] == sand["sceneId"]  # cached per selection
+
+
+def test_static_files_are_revalidated(client):
+    assert client.get("/js/main.js").headers["cache-control"] == "no-cache"

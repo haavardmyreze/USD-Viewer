@@ -5,3 +5,4 @@ python-multipart==0.0.33
 numpy==2.5.4
 pillow==13.0.0
 fast-simplification==0.1.13
+OpenEXR==3.5.3

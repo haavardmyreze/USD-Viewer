@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="100%"
+   height="100%"
+   viewBox="0 0 16 16"
+   version="1.1"
+   xml:space="preserve"
+   style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"
+   id="svg1316"
+   sodipodi:docname="primtype_cylinder.svg"
+   inkscape:version="1.2.1 (9c6d41e, 2022-07-14)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"><defs
+   id="defs1320" /><sodipodi:namedview
+   id="namedview1318"
+   pagecolor="#ffffff"
+   bordercolor="#000000"
+   borderopacity="0.25"
+   inkscape:showpageshadow="2"
+   inkscape:pageopacity="0.0"
+   inkscape:pagecheckerboard="0"
+   inkscape:deskcolor="#d1d1d1"
+   showgrid="false"
+   inkscape:zoom="64.1875"
+   inkscape:cx="8.0155794"
+   inkscape:cy="7.9922103"
+   inkscape:window-width="2560"
+   inkscape:window-height="1367"
+   inkscape:window-x="0"
+   inkscape:window-y="42"
+   inkscape:window-maximized="1"
+   inkscape:current-layer="primtype_cylinder" />
+    <g
+   id="primtype_cylinder"
+   transform="matrix(0.84940684,0,0,1,1.2149382,0.18400001)">
+        <path
+   d="m 13.988,1.816 v 12 c 0,1.104 -2.688,2 -6,2 -3.311,0 -6,-0.896 -6,-2 v -12 c 1.974,-0.906 2.689,-1.309 6,-1.309 3.312,0 4.012,0.296 6,1.309 z"
+   style="fill:#4c6582"
+   id="path1309" />
+        <path
+   d="m 2.49,3.307 v 10.509 c 0,0 0.702,1.42 5.498,1.42 1.15,0 2,-0.293 2,-0.293 V 4.3377456 c 0,0 -0.463,0.092254 -2,0.092254 C 4.299,4.43 2.49,3.307 2.49,3.307 Z"
+   style="fill:#a0adbd"
+   id="path1311"
+   sodipodi:nodetypes="ccsccsc" />
+        <ellipse
+   cx="7.9879999"
+   cy="1.816"
+   rx="6"
+   ry="2"
+   style="fill:#778aa0"
+   id="ellipse1313" />
+    </g>
+</svg>

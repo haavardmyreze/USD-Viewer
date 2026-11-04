@@ -11,7 +11,7 @@ converts the result to a single GLB, which the three.js viewer loads.
 Browser                          Conversion service (Python + usd-core)
 ───────                          ──────────────────────────────────────
 Drop folder / .zip / .usdz ───▶  store upload (content-hashed)
-                                 find root layer (not referenced by others)
+                                 find root layer (pipeline assemblies first)
                                  open stage → compose everything
                                  report missing assets + warnings
 three.js + fly controls   ◀───   convert → GLB (cached)
@@ -77,7 +77,10 @@ python -m tests.make_scene sample_scene
 | Double-click | Fly to the point under the cursor |
 | W A S D / arrows, E / Q | Fly (also without the mouse), up / down |
 | Shift / Ctrl | 4x faster / 4x slower |
-| F | Frame the whole scene |
+| Click | Select the prim under the cursor (an instance picks its PointInstancer) |
+| F | Frame the selection, or the whole scene |
+| T / Esc | Scene graph, clear the selection |
+| [ / ] | Previous / next variant of the default prim |
 | G / L / B / P | Grid, shadows, double-sided, proxy geometry |
 | I / O / ? | Inspector, open another scene, controls help |
 
@@ -103,6 +106,49 @@ The URL keeps the upload id and root layer (`#upload=…&root=…`), so a reload
 restores the scene for as long as the upload is kept on the server (48 h by default).
 A `.glb` file dropped on the page is loaded directly, without the server.
 
+## Scene graph
+
+**T** (or the tree button in the top bar) opens the composed prim hierarchy. It
+is usd-refgraph's scene tree, in the same design: Houdini's Scene Graph Tree icons
+for each prim type (a kind's stars on Xforms and Scopes), connector lines,
+`over`s in italics, deactivated prims struck through, and reference, payload,
+variant and instance flags on the rows. It opens expanded (materials closed) and is
+read a level at a time, so a heavy stage is never walked whole; arrow keys walk
+it, Shift-click or Shift+arrow expands or collapses a whole branch.
+
+Selecting works both ways. A prim picked in the tree is highlighted in the view
+(everything under it, or the instances of a prototype); double-click or **F**
+frames it. Clicking geometry opens the tree onto its prim; a PointInstancer
+instance selects the instancer and names the instance (`…/PointInstancer[4]`).
+The detail panel shows the prim's type, kind, schemas and how much of it is drawn,
+and every layer with an opinion on it, strongest first.
+
+The tree is the stage as converted: same payloads, same variant selections.
+
+The Houdini icons in `web/vendor/houdini/` are SideFX's own SVGs, copied unchanged
+from usd-refgraph; check your Houdini licence before shipping this outside the
+studio.
+
+## Variants
+
+When the default prim (or the only root prim) has variant sets, the top bar shows
+one switcher per set: pick a variant, step with ‹ ›, or press **[** / **]**. Any
+prim's variant sets can be switched from its detail panel in the scene graph.
+
+Switching re-composes the stage with the selection in an anonymous session
+layer; the files on disk are never changed. The camera, the scene graph and the
+selection stay where they were. Each combination is converted once and cached,
+and textures are cached across conversions, so stepping back and forth is quick.
+The selections are kept in the URL (`#…&variants=…`).
+
+## Root layer
+
+A folder (dropped or opened by path) opens its pipeline **assembly**, as
+usd-refgraph names them: `<name>.usda` with lowercase, hyphenated tokens and no
+`_`. A shot root (`<seq>-<shot>.usda`) comes first, then sets (`set-…`), then assets;
+blocks (`<name>_<block>.usda|usdc`) are not offered. A folder with no conventionally
+named files falls back to the layers nothing else references.
+
 ## What the converter supports (first pass)
 
 - `Mesh` with any polygon counts, holes and left-handed orientation; `Cube`, `Sphere`,
@@ -116,10 +162,14 @@ A `.glb` file dropped on the page is loaded directly, without the server.
   written as GPU instancing (`EXT_mesh_gpu_instancing`)
 - MaterialX `standard_surface` / `open_pbr_surface` (preferred over an auto-generated
   `UsdPreviewSurface` fallback): base colour, roughness, metalness, normal, emission,
-  through image, convert and extract nodes. Triplanar texture nodes (e.g. Karma's
+  through image, convert, extract and separate nodes. Triplanar texture nodes (e.g. Karma's
   `kma_*triplanar*`) are rendered as triplanar projection in the viewer; hex tiling is
   approximated as plain triplanar
 - Textures larger than 2048 px are downscaled (opaque ones re-encoded as JPEG)
+- OpenEXR textures (via the `OpenEXR` package), converted to 8 bit using the authored
+  colour space: linear (and ACEScg / ACES2065-1) colour maps are sRGB-encoded, maps
+  tagged `srgb_texture` are kept as is, data maps (`Raw`) stay linear, and normal maps
+  stored in -1..1 are remapped
 - `upAxis` and `metersPerUnit`: output is always Y-up metres
 - Visibility and purpose: `render` geometry by default, `proxy` geometry with the
   Proxy toggle; `guide` is always hidden
@@ -147,11 +197,16 @@ cameras and lights. These are listed in the viewer's warnings when present.
 
 - `POST /api/uploads`: multipart with `files` and a matching `paths` field (relative
   path of each file). Returns `uploadId`, `usdFiles`, `rootCandidates` and the suggested `root`.
-- `POST /api/uploads/{uploadId}/convert` with `{"root": "path/to/root.usda", "purpose": "render"}`
-  (both optional). Returns the report, including `glbUrl`.
-- `POST /api/open` with `{"path": "/abs/path/to/root.usda" or folder, "root": …, "purpose": …}`:
-  convert files in place on the server machine (see `USDV_LOCAL_PATHS`).
-- `GET /api/scenes/{sceneId}/scene.glb`
+- `POST /api/uploads/{uploadId}/convert` with `{"root": "path/to/root.usda", "purpose": "render",
+  "variants": {"/Prim": {"set": "variant"}}}` (all optional). Returns the report, including
+  `glbUrl` and the default prim's variant sets (`defaultVariants`).
+- `POST /api/open` with `{"path": "/abs/path/to/root.usda" or folder, "root": …, "purpose": …,
+  "variants": …}`: convert files in place on the server machine (see `USDV_LOCAL_PATHS`).
+- `GET /api/scenes/{sceneId}/scene.glb`. Nodes carry the prim they belong to in
+  `extras.usdPath` (and `usdProto`, `usdInstanceIds` for PointInstancer instances).
+- `GET /api/scenes/{sceneId}/prims?path=/World`: one level of the prim hierarchy;
+  `/subtree?path=…` a whole branch (up to 5,000 prims); `/reveal?path=…` the levels
+  down to a prim; `/prim?path=…` one prim's detail and opinions.
 - `GET /api/health`
 
 ## Development

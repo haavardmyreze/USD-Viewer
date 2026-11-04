@@ -16,6 +16,27 @@ USD_EXTS = {".usd", ".usda", ".usdc", ".usdz"}
 _IGNORED_PARTS = {"__MACOSX", ".DS_Store", "Thumbs.db"}
 _ROOT_NAME_HINT = re.compile(r"(^|[_\-.])(root|main|scene|shot|stage|assembly|master|world|layout|set)([_\-.]|$)", re.I)
 
+# Pipeline naming convention, as usd-refgraph reads it: `_` is the only token
+# separator and tokens never contain `_`, so a published filename parses
+# unambiguously. `<name>.usda` is an assembly (pure composition, the file
+# downstream work points at), `<seq>-<shot>.usda` a shot root, and
+# `<name>_<block>.usda|usdc` a block. Case-sensitive on purpose: the convention
+# is lowercase.
+_TOKEN = r"[a-z0-9]+(?:-[a-z0-9]+)*"
+_SHOT_ROOT_RE = re.compile(rf"^[a-z]{{3,5}}-[0-9]{{4}}\.usda$")
+_ASSEMBLY_RE = re.compile(rf"^{_TOKEN}\.usda$")
+_TIER_ORDER = {"shot": 0, "set": 1, "asset": 2}
+
+
+def assembly_tier(path: str) -> str | None:
+    """"shot", "set" or "asset" when the filename is an assembly, else None."""
+    name = PurePosixPath(path.replace("\\", "/")).name
+    if _SHOT_ROOT_RE.match(name):
+        return "shot"
+    if _ASSEMBLY_RE.match(name):
+        return "set" if name.startswith("set-") else "asset"
+    return None
+
 
 class UploadError(Exception):
     pass
@@ -73,7 +94,11 @@ def list_usd_files(directory: Path) -> list[str]:
 
 
 def find_root_candidates(directory: Path) -> list[str]:
-    """USD files that no other uploaded layer references, best guess first."""
+    """Root layer choices, best first.
+
+    The pipeline's assemblies when there are any (see `assembly_tier`);
+    otherwise the USD files no other layer references.
+    """
     files = list_usd_files(directory)
     abs_files = {os.path.realpath(directory / f): f for f in files}
     referenced: set[str] = set()
@@ -99,6 +124,13 @@ def find_root_candidates(directory: Path) -> list[str]:
                 if real in abs_files and real != os.path.realpath(full):
                     referenced.add(abs_files[real])
 
+    # assemblies only, as usd-refgraph lists them: shot roots, then sets, then assets
+    assemblies = [f for f in files if assembly_tier(f) and dep_count.get(f, 0) >= 0]
+    if assemblies:
+        return sorted(assemblies, key=lambda rel: (
+            _TIER_ORDER[assembly_tier(rel)], rel in referenced, rel.count("/"), rel.lower()))
+
+    # no conventionally named files: best guess at layers nothing else references
     candidates = [f for f in files if f not in referenced and dep_count.get(f, 0) >= 0]
     if not candidates:
         candidates = files
