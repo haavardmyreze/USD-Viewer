@@ -224,7 +224,11 @@ export class Viewer {
     if (info.pivot) {
       const frame = new THREE.Matrix4().fromArray(info.pivot.matrix); // USD row-major = three column-major
       frame.premultiply(this.stageToWorld);
-      this.pivot.show(frame, new THREE.Vector3().fromArray(info.pivot.point));
+      // sized to the selection, so it reaches about to the edge of what it moves
+      const box = this.selection.bounds(this.selection.current);
+      const radius = box ? box.getBoundingSphere(new THREE.Sphere()).radius : 0;
+      const length = radius > 0 ? radius * 0.8 : this.radius * 0.05;
+      this.pivot.show(frame, new THREE.Vector3().fromArray(info.pivot.point), length);
     } else this.pivot.hide();
     this.selection.setPeers(info.instances);
     this.selection.sync();
@@ -506,7 +510,6 @@ export class Viewer {
     const detail = DETAIL_LEVELS[this.options.detail] ?? 1;
     this.lod.update(this.camera, refine ? Math.max(detail * 2, 2) : detail);
     this.selection.sync();
-    this.pivot.update(this.camera, this.canvas.clientHeight);
     this.renderer.render(this.scene, this.camera);
 
     this.lastFrame = { triangles: this.renderer.info.render.triangles, refined: refine };
