@@ -9,12 +9,15 @@ prim and a class are exactly what someone debugging composition wants to see.
 
 from __future__ import annotations
 
+import glob
 import os
 import threading
 from collections import OrderedDict
 from typing import Any
 
-from pxr import Gf, Sdf, Usd, UsdGeom
+from pxr import Gf, Pcp, Sdf, Usd, UsdGeom, UsdShade
+
+from . import pipeline
 
 #: Children returned for one prim before the list is cut short.
 CHILD_LIMIT = 500
@@ -195,7 +198,228 @@ class SceneGraph:
             peers, truncated = self._instance_peers(prim)
             return {"pivot": _pivot(prim, instance, time), "instances": peers, "truncated": truncated}
 
+    def info(self, prim_path: str, instance: int | None = None, proto: str | None = None) -> dict[str, Any]:
+        """Who made what was clicked, and what state it is in: the info card.
+
+        `entities` runs from the inside out: the asset the prim belongs to, then
+        whatever placed it (a set, a shot), ending with the stage's own root
+        entity. Each lists its published layers with their publish records
+        (customLayerData), read the way usd-refgraph reads them. `materials` are
+        the ones bound to the clicked geometry, with the textures they read.
+        """
+        with STAGES.lock:
+            prim = self._prim(prim_path)
+            if prim.IsPseudoRoot():
+                raise SceneGraphError(400, "Pick a prim, not the stage")
+            target = prim
+            copies = None
+            if instance is not None and prim.IsA(UsdGeom.PointInstancer):
+                copies, proto_root = _instancer_copies(prim, instance)
+                if proto_root:
+                    target = proto_root
+            if proto:
+                inner = self.stage.GetPrimAtPath(proto) if Sdf.Path.IsValidPathString(proto) else None
+                if inner:
+                    target = inner
+            if copies is None and (prim.IsInstance() or prim.IsInstanceProxy()):
+                peers, truncated = self._instance_peers(prim)
+                if peers:
+                    copies = {"kind": "instance", "same": len(peers) + 1, "truncated": truncated}
+
+            entities = self._entities(target)
+            asset = entities[0]["name"] if entities else None
+            materials = self._materials(target, asset)
+            out: dict[str, Any] = {
+                "prim": _summary(prim),
+                "target": str(target.GetPath()),
+                "entities": entities,
+                "materials": materials,
+            }
+            if instance is not None:
+                out["instance"] = instance
+            if copies:
+                out["copies"] = copies
+            return out
+
     # -- helpers -------------------------------------------------------------
+
+    def _entities(self, target: Usd.Prim) -> list[dict[str, Any]]:
+        """The pipeline entities `target` belongs to, innermost first.
+
+        Walks up from the prim: the nearest prim that references (or payloads) a
+        published layer is where its asset enters the scene, and the layers of
+        that arc's layer stack (the assembly and its sublayered blocks, plus any
+        nested arcs on the same prim) are that asset's publishes. Further up, the
+        same again for whatever placed it, and last the root layer stack.
+        """
+        found: OrderedDict[str, dict[str, Any]] = OrderedDict()
+
+        def layers_of(entity: str) -> OrderedDict:
+            return found[entity]["_layers"]
+
+        def take(layer: Sdf.Layer, entry: dict[str, Any]) -> None:
+            if layer.anonymous:
+                return
+            name, _ = pipeline.split_entity(layer.realPath or layer.identifier)
+            if name not in found:
+                found[name] = dict(entry, name=name, _layers=OrderedDict())
+            layers_of(name).setdefault(layer.identifier, layer)
+
+        prim = target
+        while prim and not prim.IsPseudoRoot():
+            for arc in Usd.PrimCompositionQuery(prim).GetCompositionArcs():
+                if arc.IsAncestral() or arc.GetArcType() not in (Pcp.ArcTypeReference, Pcp.ArcTypePayload):
+                    continue
+                introducing = arc.GetIntroducingLayer()
+                entry = {
+                    "primPath": str(prim.GetPath()),
+                    "arc": "payload" if arc.GetArcType() == Pcp.ArcTypePayload else "reference",
+                    "introducedBy": os.path.basename(introducing.realPath or introducing.identifier)
+                    if introducing and not introducing.anonymous else None,
+                    "_prim": prim,
+                }
+                for layer in arc.GetTargetNode().layerStack.layers:
+                    take(layer, entry)
+            prim = prim.GetParent()
+
+        # the root layer stack: the stage's own entity, and anything it sublayers
+        # that has a say about where the asset was placed (a set inside a shot)
+        stack = [layer for layer in self.stage.GetLayerStack(includeSessionLayers=False) if not layer.anonymous]
+        root_layer = self.stage.GetRootLayer()
+        root_name, _ = pipeline.split_entity(root_layer.realPath or root_layer.identifier)
+        anchor = Sdf.Path(next(reversed(found.values()))["primPath"]) if found else target.GetPath()
+        root_entry = {"primPath": "/", "arc": "root", "introducedBy": None, "_prim": None}
+        for layer in stack:
+            name, _ = pipeline.split_entity(layer.realPath or layer.identifier)
+            if name == root_name or name in found or layer.GetPrimAtPath(anchor):
+                take(layer, dict(root_entry, arc="root" if name == root_name else "sublayer"))
+        if root_name in found:  # the stage's own entity is the outermost
+            found.move_to_end(root_name)
+
+        return [self._entity(entry) for entry in found.values()]
+
+    def _entity(self, entry: dict[str, Any]) -> dict[str, Any]:
+        name = entry["name"]
+        layers = [self._layer(layer) for layer in entry["_layers"].values()]
+        layers.sort(key=lambda layer: layer["role"] != "assembly")  # stable: blocks keep their order
+        role, tier = next(((layer["role"], layer["tier"]) for layer in layers if layer["role"] == "assembly"),
+                          (layers[0]["role"], layers[0]["tier"]) if layers else ("other", None))
+        records = [layer["record"] for layer in layers if layer.get("record")]
+        artists: list[str] = []
+        for record in sorted(records, key=lambda r: -(r.get("exportedAt") or 0)):
+            if record.get("artist") and record["artist"] not in artists:
+                artists.append(record["artist"])
+        issues = []
+        unrecorded = [layer["name"] for layer in layers if not layer.get("record")]
+        if unrecorded:
+            issues.append({"level": "warn", "text": f"No publish record in {', '.join(unrecorded)}"})
+        odd = [layer["name"] for layer in layers if layer["role"] == "other"]
+        if odd:
+            issues.append({"level": "info", "text": f"Outside the naming convention: {', '.join(odd)}"})
+        for layer in layers:
+            raw = (layer.get("record") or {}).get("statusRaw")
+            if raw:
+                issues.append({"level": "info", "text": f"{layer['name']}: status “{raw}” is not one the pipeline knows"})
+
+        out: dict[str, Any] = {
+            "name": name,
+            "tier": tier if role in ("assembly", "block") else None,
+            "category": pipeline.category_of(name),
+            "primPath": entry["primPath"],
+            "arc": entry["arc"],
+            "status": pipeline.rollup_status([r["status"] for r in records]),
+            "artists": artists,
+            "layers": layers,
+            "issues": issues,
+        }
+        published = [r["exportedAt"] for r in records if r.get("exportedAt")]
+        if published:
+            out["lastPublished"] = max(published)
+        if entry.get("introducedBy"):
+            out["introducedBy"] = entry["introducedBy"]
+        prim = entry.get("_prim")
+        if prim:
+            variant_sets = prim.GetVariantSets()
+            out["variants"] = [
+                {"name": set_name, "selection": variant_sets.GetVariantSelection(set_name) or None,
+                 "options": list(variant_sets.GetVariantSet(set_name).GetVariantNames())}
+                for set_name in variant_sets.GetNames()
+            ]
+        return out
+
+    def _layer(self, layer: Sdf.Layer) -> dict[str, Any]:
+        real = layer.realPath or layer.identifier
+        role, tier = pipeline.classify(real)
+        _, block = pipeline.split_entity(real)
+        out: dict[str, Any] = {
+            "name": os.path.basename(real),
+            "path": self.display(real),
+            "role": role,
+            "tier": tier,
+            "block": block,
+        }
+        record = pipeline.read_record(layer.customLayerData)
+        if record:
+            out["record"] = record
+        try:
+            out["modified"] = int(os.path.getmtime(real) * 1000)
+        except OSError:
+            pass
+        return out
+
+    def _materials(self, target: Usd.Prim, asset: str | None, limit: int = 3, budget: int = 2000) -> list[dict[str, Any]]:
+        """The materials bound to the target, or to the geometry beneath it, with the
+        textures each reads."""
+        seen: OrderedDict[str, Usd.Prim] = OrderedDict()
+        for n, prim in enumerate(Usd.PrimRange(target, PREDICATE)):
+            if n >= budget or len(seen) >= limit:
+                break
+            if not prim.IsA(UsdGeom.Imageable):
+                continue
+            material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
+            if material and str(material.GetPath()) not in seen:
+                seen[str(material.GetPath())] = material.GetPrim()
+        out = []
+        for path, prim in seen.items():
+            entry: dict[str, Any] = {"path": path, "name": prim.GetName(), "textures": self._textures(prim)}
+            owners = self._entities(prim)
+            # a material from somewhere else than the asset itself, e.g. a shared library
+            if owners and owners[0]["name"] != asset:
+                entity = owners[0]
+                entry["entity"] = {"name": entity["name"], "status": entity["status"],
+                                   "artists": entity["artists"], "lastPublished": entity.get("lastPublished")}
+            out.append(entry)
+        return out
+
+    def _textures(self, material: Usd.Prim) -> list[dict[str, Any]]:
+        textures: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        for prim in Usd.PrimRange(material, PREDICATE):
+            for attr in prim.GetAttributes():
+                if attr.GetTypeName() != Sdf.ValueTypeNames.Asset:
+                    continue
+                value = attr.Get()
+                if not value or not value.path:
+                    continue
+                authored = value.path
+                resolved = value.resolvedPath
+                exists = bool(resolved) and os.path.isfile(resolved)
+                if "<UDIM>" in authored and not resolved:
+                    stack = attr.GetPropertyStack(Usd.TimeCode.Default())
+                    if stack:
+                        pattern = stack[0].layer.ComputeAbsolutePath(authored)
+                        exists = bool(glob.glob(pattern.replace("<UDIM>", "[0-9][0-9][0-9][0-9]")))
+                        resolved = pattern
+                if authored in textures:
+                    continue
+                entry: dict[str, Any] = {
+                    "name": os.path.basename(authored),
+                    "path": self.display(resolved) if resolved else authored,
+                    "exists": exists,
+                    "entity": pipeline.split_entity(authored)[0],
+                }
+                entry.update(pipeline.texture_info(authored))
+                textures[authored] = entry
+        return list(textures.values())
 
     def _instance_peers(self, prim: Usd.Prim, limit: int = PEER_LIMIT) -> tuple[list[str], bool]:
         if prim.IsInstance():
@@ -347,6 +571,26 @@ def _pivot(prim: Usd.Prim, instance: int | None, time: Usd.TimeCode) -> dict[str
                 point = [float(v) for v in value]
             break
     return {"matrix": _flat(cache.GetLocalToWorldTransform(prim)), "point": point}
+
+
+def _instancer_copies(prim: Usd.Prim, instance: int) -> tuple[dict[str, Any] | None, Usd.Prim | None]:
+    """How many of a PointInstancer's instances share this one's prototype, and that prototype."""
+    instancer = UsdGeom.PointInstancer(prim)
+    indices = instancer.GetProtoIndicesAttr().Get(Usd.TimeCode.EarliestTime())
+    if indices is None or not 0 <= instance < len(indices):
+        return None, None
+    index = int(indices[instance])
+    targets = instancer.GetPrototypesRel().GetForwardedTargets()
+    proto = prim.GetStage().GetPrimAtPath(targets[index]) if 0 <= index < len(targets) else None
+    copies = {
+        "kind": "pointinstancer",
+        "same": sum(1 for i in indices if int(i) == index),
+        "total": len(indices),
+        "instancer": str(prim.GetPath()),
+    }
+    if proto:
+        copies["prototype"] = proto.GetName()
+    return copies, proto or None
 
 
 def _flat(m: Gf.Matrix4d) -> list[float]:

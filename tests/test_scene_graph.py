@@ -65,3 +65,101 @@ def test_pivot_is_the_authored_pivot_in_the_prims_frame(tmp_path):
     assert graph.selection("/World/Scatter", 1)["pivot"]["matrix"][12:15] == [5.0, 0.0, 0.0]
     assert graph.selection("/World/Scatter", 7)["pivot"] is None
     assert graph.selection("/")["pivot"] is None
+
+
+def _pipeline_project(root):
+    """A set placing an asset (assembly + model and lookdev blocks) and a material
+    from a library, each layer stamped with a publish record as the publisher writes it."""
+    from pxr import Sdf, UsdShade
+
+    def record(layer, artist, status, when, **extra):
+        layer.customLayerData = {"artist": artist, "status": status, "export_datetime_unix": str(when),
+                                 "hip_file": f"workfile_{artist}_v001.hip", "rop_path": "/stage/rop1", **extra}
+
+    asset = root / "assets" / "prop-vase"
+    lib = root / "assets" / "mtl-clay"
+    tex = lib / "tex"
+    tex.mkdir(parents=True)
+    asset.mkdir(parents=True)
+    (tex / "mtl-clay_bc_2k.png").write_bytes(b"")
+
+    clay = Usd.Stage.CreateNew(str(lib / "mtl-clay.usda"))
+    material = UsdShade.Material.Define(clay, "/Clay")
+    shader = UsdShade.Shader.Define(clay, "/Clay/image")
+    shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set("./tex/mtl-clay_bc_2k.png")
+    shader.CreateInput("normal", Sdf.ValueTypeNames.Asset).Set("./tex/mtl-clay_n_2k.png")  # not on disk
+    clay.SetDefaultPrim(material.GetPrim())
+    record(clay.GetRootLayer(), "kari", "locked", 1_700_000_000)
+    clay.Save()
+
+    model = Usd.Stage.CreateNew(str(asset / "prop-vase_model.usdc"))
+    UsdGeom.Mesh.Define(model, "/Vase/geo/body")
+    record(model.GetRootLayer(), "ola", "production_ready", 1_700_000_100, comment="cleaned up the rim")
+    model.Save()
+
+    lookdev = Usd.Stage.CreateNew(str(asset / "prop-vase_lookdev.usda"))
+    lookdev.OverridePrim("/Vase/mtl/clay").GetReferences().AddReference("../mtl-clay/mtl-clay.usda")
+    body = lookdev.OverridePrim("/Vase/geo/body")
+    UsdShade.MaterialBindingAPI.Apply(body).Bind(UsdShade.Material(lookdev.GetPrimAtPath("/Vase/mtl/clay")))
+    record(lookdev.GetRootLayer(), "kari", "placeholder", 1_700_000_300)
+    lookdev.Save()
+
+    assembly = Usd.Stage.CreateNew(str(asset / "prop-vase.usda"))
+    assembly.GetRootLayer().subLayerPaths = ["./prop-vase_lookdev.usda", "./prop-vase_model.usdc"]
+    assembly.SetDefaultPrim(assembly.DefinePrim("/Vase"))
+    record(assembly.GetRootLayer(), "ola", "production_ready", 1_700_000_200)
+    assembly.Save()
+
+    set_dir = root / "sets" / "set-shop"
+    set_dir.mkdir(parents=True)
+    layout = Usd.Stage.CreateNew(str(set_dir / "set-shop_layout.usda"))
+    for i in range(2):
+        layout.DefinePrim(f"/World/Vase{i}").GetReferences().AddReference("../../assets/prop-vase/prop-vase.usda")
+    UsdGeom.Mesh.Define(layout, "/World/Floor")
+    record(layout.GetRootLayer(), "per", "placeholder", 1_700_000_400)
+    layout.Save()
+
+    shop = Usd.Stage.CreateNew(str(set_dir / "set-shop.usda"))
+    shop.GetRootLayer().subLayerPaths = ["./set-shop_layout.usda"]
+    shop.Save()  # no publish record
+    return set_dir / "set-shop.usda"
+
+
+def test_info_reads_the_publish_records_from_the_inside_out(tmp_path):
+    graph = SceneGraph("shop-info", str(_pipeline_project(tmp_path)))
+    info = graph.info("/World/Vase1/geo/body")
+    asset, shop = info["entities"]
+
+    assert asset["name"] == "prop-vase" and asset["tier"] == "asset" and asset["category"] == "prop"
+    assert asset["primPath"] == "/World/Vase1" and asset["introducedBy"] == "set-shop_layout.usda"
+    assert [layer["block"] or layer["role"] for layer in asset["layers"]] == ["assembly", "lookdev", "model"]
+    assert asset["status"] == "placeholder"  # only as finished as its least finished layer
+    assert asset["artists"] == ["kari", "ola"]  # most recent publisher first
+    assert asset["lastPublished"] == 1_700_000_300_000
+    model = asset["layers"][2]["record"]
+    assert model == {"status": "production_ready", "artist": "ola", "comment": "cleaned up the rim",
+                     "hipFile": "workfile_ola_v001.hip", "ropPath": "/stage/rop1", "exportedAt": 1_700_000_100_000}
+
+    assert shop["name"] == "set-shop" and shop["arc"] == "root"
+    assert [layer["name"] for layer in shop["layers"]] == ["set-shop.usda", "set-shop_layout.usda"]
+    assert any("set-shop.usda" in issue["text"] for issue in shop["issues"])  # no record
+
+    (material,) = info["materials"]
+    assert material["entity"]["name"] == "mtl-clay" and material["entity"]["status"] == "locked"
+    textures = {t["name"]: t for t in material["textures"]}
+    assert textures["mtl-clay_bc_2k.png"]["exists"] and textures["mtl-clay_bc_2k.png"]["channel"] == "base colour"
+    assert not textures["mtl-clay_n_2k.png"]["exists"]
+
+
+def test_info_for_a_prim_authored_in_the_scene_and_an_instancer(tmp_path):
+    graph = SceneGraph("shop-floor", str(_pipeline_project(tmp_path)))
+    (shop,) = graph.info("/World/Floor")["entities"]
+    assert shop["name"] == "set-shop"
+
+    _instancing_stage(tmp_path / "trees.usda")
+    trees = SceneGraph("trees-info", str(tmp_path / "trees.usda"))
+    info = trees.info("/World/Scatter", instance=1)
+    assert info["target"] == "/World/Scatter/protos/cube"
+    assert info["copies"] == {"kind": "pointinstancer", "same": 2, "total": 2,
+                              "instancer": "/World/Scatter", "prototype": "cube"}
+    assert trees.info("/World/Tree0")["copies"]["same"] == 3

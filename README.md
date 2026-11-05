@@ -83,7 +83,7 @@ python -m tests.make_scene sample_scene
 | Double-click | Fly to the point under the cursor |
 | W A S D / arrows, E / Q | Fly (also without the mouse), up / down |
 | Shift / Ctrl | 4x faster / 4x slower |
-| Click | Select the prim under the cursor (an instance picks its PointInstancer) |
+| Click | Select the prim under the cursor (an instance picks its PointInstancer) and show its info card |
 | F | Frame the selection, or the whole scene |
 | Z | Shading: material, no material, matcap (also the three buttons in the top bar) |
 | T / I / Esc | Scene graph, scene info, clear the selection |
@@ -143,6 +143,40 @@ The tree is the stage as converted: same payloads, same variant selections.
 The Houdini icons in `web/vendor/houdini/` are SideFX's own SVGs, copied unchanged
 from usd-refgraph; check your Houdini licence before shipping this outside the
 studio.
+
+## Info card
+
+Clicking geometry opens a small card beside the cursor saying who made it and what
+state it is in. It reads the pipeline's own bookkeeping, as
+[usd-refgraph](../USD_RND/USD_Pipeline/usd-refgraph) does: the publish record every
+published layer carries in `customLayerData` (`artist`, `status`, `comment`,
+`hip_file`, `rop_path`, `export_datetime_unix`) and the naming convention, which says
+which asset a file belongs to and which block of it. Nothing is stored anywhere else.
+
+From the inside out, the card shows:
+
+- **The asset**, found by walking up from the prim to the reference (or payload) that
+  brought it in: its name and category (`env-column`, Environment asset), its status
+  rolled up from its layers (an asset is only as finished as its least finished layer),
+  who published it and when.
+- **Where this copy sits**: how many of a PointInstancer's instances share its
+  prototype (or how many native instances there are), the variant picked for it, and
+  the layer that placed it.
+- **Published layers**: the assembly, then its blocks, each with its status, artist and
+  publish time, and its comment. A row opens onto the full record: workfile, ROP, exact
+  time, any other keys, and the file (with a copy button).
+- **Material**: the material bound to the geometry, the library it came from when it is
+  not the asset's own (`from mtl-stone`, with that library's status), and the textures it
+  reads, with their channel and resolution; missing ones in red.
+- **Placed in**: the set or shot around the asset, down to the stage's root layer, each
+  folded to one line that opens onto its layers.
+- **Things to fix**: missing textures, layers with no publish record, names outside the
+  convention and statuses the pipeline does not know.
+
+Status reads as in usd-refgraph: amber placeholder, blue production ready, green locked.
+Esc or a click on empty space closes the card; a variant switch or a change on disk
+refreshes it. It can be turned off under **Display → Info card on click**. Picking a prim
+in the scene graph does not open it: the tree's own detail panel covers that.
 
 ## Shading
 
@@ -287,6 +321,9 @@ viewer's notes when present.
 - `GET /api/scenes/{sceneId}/prims?path=/World`: one level of the prim hierarchy;
   `/subtree?path=…` a whole branch (up to 5,000 prims); `/reveal?path=…` the levels
   down to a prim; `/prim?path=…` one prim's detail and opinions.
+- `GET /api/scenes/{sceneId}/info?path=…&instance=…&proto=…`: the info card for a clicked
+  prim: the pipeline entities it belongs to (innermost first) with their layers' publish
+  records, its materials and textures, and its instance count.
 - `GET /api/health`
 
 ## Development
