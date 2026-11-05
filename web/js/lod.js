@@ -31,12 +31,15 @@ export class LodManager {
     /** Screen-height fraction below which LOD1 is used; each further level halves it. */
     this.threshold = 0.45;
     this.stats = { triangles: 0, visible: 0, culled: 0, total: 0 };
+    /** Bumped whenever any group's packing or visibility changes. */
+    this.version = 0;
   }
 
   /** Find LOD groups (and plain instanced meshes) under `root`. */
   setup(root) {
     this.groups = [];
     this.groupOf = new Map();
+    this.version += 1;
     root.updateMatrixWorld(true);
     const byId = new Map();
     const grouped = new Set();
@@ -72,6 +75,8 @@ export class LodManager {
 
     // world-space bounding sphere of every instance
     const matrices = instanced ? first.instanceMatrix.array.slice() : null;
+    // per-instance colours (e.g. a Points prim's displayColor) are packed like the matrices
+    const colors = instanced && first.instanceColor ? first.instanceColor.array.slice() : null;
     const spheres = new Float32Array(count * 4);
     for (let i = 0; i < count; i++) {
       _m.copy(first.matrixWorld);
@@ -85,6 +90,8 @@ export class LodManager {
         m.frustumCulled = false; // culled per instance here
         if (instanced) {
           m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+          if (colors && !m.instanceColor) m.instanceColor = new THREE.InstancedBufferAttribute(colors.slice(), 3);
+          m.instanceColor?.setUsage(THREE.DynamicDrawUsage);
           m.count = 0;
         }
         m.visible = false;
@@ -98,6 +105,7 @@ export class LodManager {
       localBox: box,
       world: first.matrixWorld.clone(),
       matrices,
+      colors,
       spheres,
       assigned: new Int8Array(count).fill(-2), // -2 = never assigned, -1 = culled
       tris: levels.map((meshes) => meshes.reduce((n, m) => n + triangleCount(m), 0)),
@@ -141,6 +149,10 @@ export class LodManager {
           m.visible = true;
           if (g.instanced) {
             m.instanceMatrix.array.set(g.matrices.subarray(0, 16), 0);
+            if (g.colors && m.instanceColor) {
+              m.instanceColor.array.set(g.colors.subarray(0, 3), 0);
+              m.instanceColor.needsUpdate = true;
+            }
             m.count = 1;
             g.slots[g.levels.indexOf(meshes)][0] = 0;
             m.instanceMatrix.needsUpdate = true;
@@ -150,6 +162,7 @@ export class LodManager {
       g.assigned.fill(-2);
       g.version += 1;
     }
+    this.version += 1;
   }
 
   /**
@@ -206,6 +219,7 @@ export class LodManager {
           g.slots[level][slot] = i;
           for (const m of g.levels[level]) {
             m.instanceMatrix.array.set(g.matrices.subarray(i * 16, i * 16 + 16), slot * 16);
+            if (g.colors && m.instanceColor) m.instanceColor.array.set(g.colors.subarray(i * 3, i * 3 + 3), slot * 3);
           }
         }
         counts[level] += 1;
@@ -213,14 +227,20 @@ export class LodManager {
         stats.triangles += g.tris[level];
       }
       stats.total += g.count;
-      if (changed) g.version += 1;
+      if (changed) {
+        g.version += 1;
+        this.version += 1;
+      }
       for (let l = 0; l < nLevels; l++) {
         for (const m of g.levels[l]) {
           m.visible = counts[l] > 0;
           if (g.instanced) {
             m.count = counts[l];
             // only upload when the packing changed
-            if (changed && counts[l] > 0) m.instanceMatrix.needsUpdate = true;
+            if (changed && counts[l] > 0) {
+              m.instanceMatrix.needsUpdate = true;
+              if (m.instanceColor) m.instanceColor.needsUpdate = true;
+            }
           }
         }
       }

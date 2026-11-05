@@ -416,6 +416,13 @@ def scene_selection(scene_id: str, path: str, instance: int | None = None):
     return _graph_call(scene_id, lambda g: g.selection(path, instance))
 
 
+@app.get("/api/scenes/{scene_id}/info")
+def scene_info(scene_id: str, path: str, instance: int | None = None, proto: str | None = None):
+    """The info card for a clicked prim: the asset it belongs to and what placed it,
+    each with its published layers' records, and the materials and textures it uses."""
+    return _graph_call(scene_id, lambda g: g.info(path, instance, proto))
+
+
 @app.get("/api/health")
 def health(request: Request):
     from pxr import Usd

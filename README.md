@@ -5,7 +5,14 @@ A browser viewer for multi-file OpenUSD scenes with first-person fly navigation.
 Drop a folder (or `.zip` / `.usdz`) onto the page. A small Python service uses the
 real OpenUSD library (`usd-core`) to compose the stage, resolving sublayers,
 references, payloads, variants and instancing exactly as USD defines them. It then
-converts the result to a single GLB, which the three.js viewer loads.
+converts the result to a single GLB, which the three.js viewer loads. MaterialX and
+UsdPreviewSurface shading networks are compiled to GLSL from MaterialX's own node
+library, so textures, maths, noises and projections look as they do in Houdini.
+
+**Status: under development, not in active use.** Nobody depends on the current
+behaviour, APIs or file formats yet, so changes are free to rewrite, break or
+depart from the existing logic and structure when that gives a better result.
+There is no backwards compatibility to keep.
 
 ```
 Browser                          Conversion service (Python + usd-core)
@@ -81,7 +88,7 @@ python -m tests.make_scene sample_scene
 | Double-click | Fly to the point under the cursor |
 | W A S D / arrows, E / Q | Fly (also without the mouse), up / down |
 | Shift / Ctrl | 4x faster / 4x slower |
-| Click | Select the prim under the cursor (an instance picks its PointInstancer) |
+| Click | Select the prim under the cursor (an instance picks its PointInstancer) and show its info card |
 | F | Frame the selection, or the whole scene |
 | Z | Shading: material, no material, matcap (also the three buttons in the top bar) |
 | T / I / Esc | Scene graph, scene info, clear the selection |
@@ -142,6 +149,36 @@ The Houdini icons in `web/vendor/houdini/` are SideFX's own SVGs, copied unchang
 from usd-refgraph; check your Houdini licence before shipping this outside the
 studio.
 
+## Info card
+
+Clicking geometry opens a small card docked at the top left, opposite the side panel,
+so it never covers what you clicked. It says who made the object and what state it is
+in, read from the pipeline's own bookkeeping as
+[usd-refgraph](../USD_RND/USD_Pipeline/usd-refgraph) reads it: the publish record every
+published layer carries in `customLayerData` (`artist`, `status`, `comment`,
+`hip_file`, `rop_path`, `export_datetime_unix`) and the naming convention, which says
+which asset a file belongs to and which block of it. Nothing is stored anywhere else.
+
+The card is meant to be read at a glance:
+
+- **The asset**, found by walking up from the prim to the reference (or payload) that
+  brought it in: `env-column`, Environment asset.
+- **Its status, who published last and when**: one line. An asset is only as finished
+  as its least finished layer.
+- **Variant and copies**, in one quiet line: `model damaged · 17 of 64 instances`.
+- **Its layers**: the assembly, then its blocks, each with its status dot and how long
+  ago it was published. A row opens onto the full record: comment, artist, exact time,
+  workfile, ROP and the file (with a copy button).
+- **Material** and **Set** (or Shot), one line each: the bound material and the library
+  it came from (`Stone · mtl-stone`), which opens onto its textures; and the set or shot
+  that placed the asset.
+- **Only what needs fixing**: missing textures and layers with no publish record.
+
+Status reads as in usd-refgraph: amber placeholder, blue production ready, green locked.
+Esc or a click on empty space closes the card; a variant switch or a change on disk
+refreshes it. It can be turned off under **Display → Info card on click**. Picking a prim
+in the scene graph does not open it: the tree's own detail panel covers that.
+
 ## Shading
 
 As in Blender's viewport, the three buttons at the top right (or **Z**) switch
@@ -171,37 +208,86 @@ usd-refgraph names them: `<name>.usda` with lowercase, hyphenated tokens and no
 blocks (`<name>_<block>.usda|usdc`) are not offered. A folder with no conventionally
 named files falls back to the layers nothing else references.
 
-## What the converter supports (first pass)
+## Materials
+
+MaterialX (`standard_surface`, `open_pbr_surface`, `gltf_pbr`, `surface_unlit`,
+`UsdPreviewSurface`, and `mix` of those) and UsdPreviewSurface networks are compiled to
+GLSL rather than flattened to one texture per channel. Everything upstream of the
+surface shader is generated from MaterialX's own library (the `MaterialX` package, the
+same one Houdini's viewport, usdview and MaterialXView compile):
+
+- nodes MaterialX defines as node graphs (triplanarprojection, ramps, mixes, the
+  UsdUVTexture / UsdPrimvarReader / UsdTransform2d nodes, ...) are expanded;
+- nodes with a GLSL implementation use MaterialX's source, including its noises,
+  cellular / Worley noise, hex tiling and colour transforms;
+- the geometric nodes are written against USD's own spaces: **object** is the prim's
+  local space, **world** is the stage's world in stage units and up axis. A world-space
+  triplanar projection authored in Houdini on a Z-up, centimetre stage therefore lands
+  on the same texels here.
+
+Images are stored as authored (8-bit; EXR quantised) and decoded in the shader, as
+MaterialX does: a `colorSpace` (or UsdUVTexture `sourceColorSpace`) of `srgb_texture`,
+`acescg`, the gamma and Display P3 spaces, `raw` or linear is honoured; untagged 8-bit
+colour images are read as sRGB, as Karma and Storm do. Address modes (periodic, clamp,
+mirror, constant) and `closest` filtering apply per image. `<UDIM>` textures are packed
+into one atlas. Primvars read by `geompropvalue`, `texcoord` (index 1+ reads `st1`,
+`uv1`, ...), `geomcolor` and UsdPrimvarReader become vertex attributes; a prim without
+the primvar gets the node's default.
+
+The surface shader's inputs drive three.js's physically based material (base colour,
+metalness, roughness, specular colour / IOR, coat, sheen / fuzz, transmission, thin
+film, anisotropy, emission, opacity and cutout, normal and coat normal, occlusion), so
+the viewer's lights, environment and shadows apply. That last step is the approximation:
+three.js's BRDF is not Karma's, subsurface is shown as a diffuse tint and coat colour
+tints the base. Materials that only differ in values share one compiled shader.
+
+Networks written with MaterialX 1.38 (Houdini 20) are read too: `swizzle` nodes, the old
+`normalmap` and `atan2` inputs are translated the way MaterialX's own 1.38 → 1.39 upgrade
+does, and file paths routed through `dot` nodes are followed.
+
+DCC-specific nodes MaterialX does not define (e.g. Karma's `kma_*`) are read from extra
+definition folders when available (`USDV_MATERIALX_PATH`, or the
+`PXR_MTLX_PLUGIN_SEARCH_PATHS` Houdini sets). Otherwise a triplanar or hex-tiled node is
+shown as MaterialX's own triplanarprojection / hextiledimage, and any other unknown node
+passes its first input through; each case is listed in the scene's notes. If the browser
+cannot compile a material's shader, that material falls back to a plain glTF version
+(also used by other glTF viewers) and the notes say so.
+
+`python scripts/check_shaders.py` compiles every library node as WebGL2 GLSL in headless
+Chromium and compares rendered pixels with values computed in USD's spaces (positions,
+texture coordinates, image orientation, UDIM tiles, a world-space triplanar projection).
+
+## What the converter supports
 
 - `Mesh` with any polygon counts, holes and left-handed orientation; `Cube`, `Sphere`,
-  `Cylinder`, `Cone` and `Plane` gprims
+  `Cylinder`, `Cone`, `Capsule` and `Plane` gprims
+- Subdivision surfaces (USD's default `catmullClark`, plus `bilinear`; `loop` is refined
+  as Catmull-Clark): refined two levels (fewer for very large meshes), with boundary
+  interpolation, creases and corners. UVs are interpolated linearly per face
+- `BasisCurves`: linear and cubic (bezier, bspline, catmullRom; nonperiodic, periodic,
+  pinned), swept into tubes of their widths; curves without widths are drawn as lines
+- `Points`: a small sphere per point with its width and colour (GL points when there are
+  very many)
 - `normals`, `st` and `displayColor` primvars at every interpolation, indexed or not
-- `UsdPreviewSurface` materials: diffuse/opacity, metallic/roughness, normal,
-  occlusion and emissive, as values or `UsdUVTexture` textures (PNG/JPEG passed
-  through, other Pillow-readable formats re-encoded), plus `GeomSubset` material bindings
+- Materials as described above; the plain glTF version reads `UsdPreviewSurface`
+  textures and MaterialX image nodes, plus `GeomSubset` material bindings
 - Native instancing: instances share one glTF mesh
 - `PointInstancer`, including nested instancers and `inactiveIds` / `invisibleIds`,
   written as GPU instancing (`EXT_mesh_gpu_instancing`)
-- MaterialX `standard_surface` / `open_pbr_surface` (preferred over an auto-generated
-  `UsdPreviewSurface` fallback): base colour, roughness, metalness, normal, emission,
-  through image, convert, extract and separate nodes. Triplanar texture nodes (e.g. Karma's
-  `kma_*triplanar*`) are rendered as triplanar projection in the viewer; hex tiling is
-  approximated as plain triplanar
 - Textures larger than 2048 px are downscaled (opaque ones re-encoded as JPEG)
 - OpenEXR textures (via the `OpenEXR` package), converted to 8 bit using the authored
-  colour space: linear (and ACEScg / ACES2065-1) colour maps are sRGB-encoded, maps
-  tagged `srgb_texture` are kept as is, data maps (`Raw`) stay linear, and normal maps
-  stored in -1..1 are remapped
+  colour space
 - `upAxis` and `metersPerUnit`: output is always Y-up metres
 - Visibility and purpose: `render` geometry by default, `proxy` geometry with the
   Proxy toggle; `guide` is always hidden
 - Reports unresolved asset paths, composition errors, unsupported prims and
   materials, layers and variant sets
 
-**Not yet supported:** MDL materials (rendered grey), arbitrary MaterialX node graphs
-beyond the nodes above, `UsdTransform2d` texture transforms, `Capsule`, curves, points, subdivision
-(meshes are shown as their control cage with smooth normals), animation, USD
-cameras and lights. These are listed in the viewer's warnings when present.
+**Not yet supported:** MDL and OSL shaders (rendered grey), BSDF graphs built from
+individual MaterialX BSDF nodes, displacement, `.mtlx` files referenced directly from
+USD (usd-core has no MaterialX file format plugin), NURBS curves and patches, animation,
+per-instance primvars on PointInstancers, USD cameras and lights. These are listed in the
+viewer's notes when present.
 
 ## Configuration
 
@@ -214,6 +300,13 @@ cameras and lights. These are listed in the viewer's warnings when present.
 | `USDV_LODS` | `1` | Generate levels of detail (`0` to disable) |
 | `USDV_LOD_MIN_TRIANGLES` | `20000` | Meshes with fewer triangles get no LODs |
 | `USDV_LOCAL_PATHS` | `auto` | Open-by-path: `auto` = only for browsers on the server machine, `1` = always, `0` = never |
+| `USDV_SHADER_GRAPHS` | `1` | Compile MaterialX / UsdPreviewSurface networks to GLSL (`0`: plain glTF materials only) |
+| `USDV_MATERIALX_PATH` | | Extra folders of MaterialX node definitions (also read: `PXR_MTLX_PLUGIN_SEARCH_PATHS`) |
+| `USDV_UDIM_ATLAS_SIZE` | `4096` | Longest side of the atlas UDIM tiles are packed into |
+| `USDV_SUBDIV_LEVEL` | `2` | Catmull-Clark levels for subdivision meshes (`0` shows the cage) |
+| `USDV_SUBDIV_MAX_FACES` | `400000` | Fewer levels for meshes that would exceed this many faces |
+| `USDV_CURVE_MAX_TRIANGLES` | `3000000` | Curves of a prim beyond this are drawn as lines instead of tubes |
+| `USDV_POINTS_MAX_SPHERES` | `250000` | Points of a prim beyond this are drawn as GL points |
 
 ## API
 
@@ -229,6 +322,9 @@ cameras and lights. These are listed in the viewer's warnings when present.
 - `GET /api/scenes/{sceneId}/prims?path=/World`: one level of the prim hierarchy;
   `/subtree?path=…` a whole branch (up to 5,000 prims); `/reveal?path=…` the levels
   down to a prim; `/prim?path=…` one prim's detail and opinions.
+- `GET /api/scenes/{sceneId}/info?path=…&instance=…&proto=…`: the info card for a clicked
+  prim: the pipeline entities it belongs to (innermost first) with their layers' publish
+  records, its materials and textures, and its instance count.
 - `GET /api/health`
 
 ## Development
@@ -240,6 +336,9 @@ pip install -r requirements-dev.txt
 ```bash
 python -m pytest
 ```
+
+`python scripts/check_shaders.py` runs the browser checks of the compiled materials
+(needs Node.js with Playwright and its Chromium).
 
 three.js is vendored in `web/vendor/three`, so no CDN is needed at runtime. To
 update it, run `scripts/vendor-three.sh <version>`.

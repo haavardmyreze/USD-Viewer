@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { Viewer } from './viewer.js';
 import { SceneGraph } from './scenegraph.js';
+import { InfoCard } from './infocard.js';
 import { MATCAPS, SHADING_MODES, matcap } from './shading.js';
 import {
   convertUpload, filesFromDrop, filesFromInput, getHealth, getUpload, isDirectGltf, openPath, uploadFiles,
@@ -270,6 +271,9 @@ function showReport(report) {
   // problems, in plain words
   const missing = report?.unresolved || [];
   const warnings = report ? [...report.compositionErrors, ...report.warnings] : [];
+  for (const m of viewer.failedShaders || []) {
+    warnings.push(`Material ${m}: its shading network did not compile in this browser; shown with simplified shading`);
+  }
   const issues = [];
   if (missing.length) {
     const advice = report?.source === 'upload'
@@ -370,6 +374,9 @@ async function loadReport(next, { same = false } = {}) {
   graph.setScene(next.sceneId, { keep: same });
   renderVariants();
   void showSelection(graph.selection);
+  // re-composed (a variant switched, a file changed): the card reads the new stage
+  if (same && infoCard.visible && infoCard.sel) void infoCard.show(next.sceneId, infoCard.sel);
+  else infoCard.hide();
   hideLoading();
 }
 
@@ -579,7 +586,10 @@ function togglePurpose() {
 // -- scene graph ------------------------------------------------------------------------
 
 const graph = new SceneGraph($('graph-body'), {
-  onSelect: (sel) => showSelection(sel),
+  onSelect: (sel) => {
+    infoCard.hide(); // the card belongs to a click in the view; the tree has its own detail
+    void showSelection(sel);
+  },
   onFrame: (path) => {
     if (!viewer.frameSelection({ path, instance: graph.selection?.path === path ? graph.selection.instance : null })) {
       toast('Nothing under this prim is drawn in the view', 'ok');
@@ -610,9 +620,13 @@ async function showSelection(sel) {
   } catch { /* offline: keep the plain highlight */ }
 }
 
-/** Select from the 3D view (or clear with null); the tree opens onto the prim. */
-function selectFromView(hit) {
+/**
+ * Select from the 3D view (or clear with null); the tree opens onto the prim. A
+ * click (`fromClick`) also opens the info card.
+ */
+function selectFromView(hit, fromClick = false) {
   if (!hit) {
+    infoCard.hide();
     void showSelection(null);
     void graph.reveal(null);
     return;
@@ -620,7 +634,18 @@ function selectFromView(hit) {
   const sel = { path: hit.path, instance: hit.instance ?? null };
   void showSelection(sel);
   void graph.reveal(sel.path, sel.instance);
+  if (fromClick && showInfoCard && graph.sceneId) void infoCard.show(graph.sceneId, { ...sel, proto: hit.proto ?? null });
+  else infoCard.hide();
 }
+
+// -- info card: who made what was clicked ------------------------------------------------
+
+let showInfoCard = true;
+const infoCard = new InfoCard(document.body, {
+  onFrame: (sel) => { if (!sel || !viewer.frameSelection(sel)) viewer.frameScene(); },
+  onClose: () => infoCard.hide(),
+  onToast: (message, kind) => toast(message, kind),
+});
 
 function frame() {
   const sel = graph.selection;
@@ -648,6 +673,10 @@ bindSwitch('opt-shadows', 'shadows', (on) => viewer.setShadows(on));
 bindSwitch('opt-double', 'doubleSided', (on) => viewer.setDoubleSided(on));
 let showStats = false;
 bindSwitch('opt-stats', 'stats', (on) => { showStats = on; });
+bindSwitch('opt-infocard', 'infoCard', (on) => {
+  showInfoCard = on;
+  if (!on) infoCard.hide();
+});
 $('opt-proxy').addEventListener('change', () => {
   $('opt-proxy').checked = purpose === 'proxy'; // togglePurpose decides
   togglePurpose();
@@ -781,7 +810,7 @@ $('viewport').addEventListener('pointerup', (e) => {
   if (!p || e.button !== 0 || !viewer.model || !graph.sceneId) return;
   if (Math.hypot(e.clientX - p.x, e.clientY - p.y) > 4 || performance.now() - p.t > 400) return;
   const rect = $('viewport').getBoundingClientRect();
-  selectFromView(viewer.pickObject(e.clientX - rect.left, e.clientY - rect.top));
+  selectFromView(viewer.pickObject(e.clientX - rect.left, e.clientY - rect.top), true);
 });
 $('btn-proxy').addEventListener('click', togglePurpose);
 $('btn-help').addEventListener('click', () => { $('help').hidden = false; });

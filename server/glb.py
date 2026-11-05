@@ -96,8 +96,11 @@ class GlbBuilder:
         self.gltf["images"].append(img)
         return len(self.gltf["images"]) - 1
 
-    def add_sampler(self, wrap_s: int, wrap_t: int) -> int:
+    def add_sampler(self, wrap_s: int, wrap_t: int, nearest: bool = False) -> int:
         sampler = {"wrapS": wrap_s, "wrapT": wrap_t}
+        if nearest:  # MaterialX filtertype "closest"
+            sampler["magFilter"] = 9728
+            sampler["minFilter"] = 9984
         for i, existing in enumerate(self.gltf["samplers"]):
             if existing == sampler:
                 return i

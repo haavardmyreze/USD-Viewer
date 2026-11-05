@@ -9,21 +9,24 @@
 // the other instances of the same prototype in a PointInstancer (found here),
 // and the other copies of a native instance (listed by the server: setPeers).
 //
-// Highlights are overlays: a child of each selected mesh that shares its
-// geometry buffers and instance matrices and draws a translucent tint on top.
-// As a child it follows the mesh's LOD visibility; per-instance selections are
-// a mask attribute repacked whenever the LOD manager repacks the instances.
+// Highlights are a translucent tint drawn over the geometry, batched so their
+// cost follows what is highlighted, not how it is split up: every highlighted
+// copy of one geometry (thousands of native instances, a PointInstancer's
+// instances) is one instanced draw. A batch holds only the highlighted copies
+// the LOD manager currently draws at that geometry's level, read from its
+// per-instance state and repacked when it changes, so one highlighted
+// instance out of a million costs one instance.
 //
-// Highlights fade in and out (animate() drives it): the selection first, its
-// peers a moment later. Overlays are pooled per mesh, so one can fade out while
-// another on the same mesh fades in.
+// Each selection is a generation of batches that fades in (the selection
+// first, its peers a moment later) and out on its own, so the old highlight
+// can fade while the new one appears.
 import * as THREE from 'three';
 import { HELPER_LAYER } from './picking.js';
 
 /** Per highlight role: tint, base opacity and extra opacity at silhouettes. */
 const LOOKS = {
-  selected: { tint: new THREE.Color(0x0a84ff), alpha: 0.32, rim: 0.38 }, // refgraph's selection blue
-  peer: { tint: new THREE.Color(0xffa63d), alpha: 0.16, rim: 0.28 }, // the other copies: amber, faint
+  selected: { tint: new THREE.Color(0x0a84ff), alpha: 0.32, rim: 0.38, order: 11 }, // refgraph's selection blue
+  peer: { tint: new THREE.Color(0xffa63d), alpha: 0.16, rim: 0.28, order: 10 }, // the other copies: amber, faint
 };
 /** Fade timings, in ms. */
 const FADE_IN = 220;
@@ -33,20 +36,18 @@ const smooth = (t) => t * t * (3 - 2 * t);
 
 const vertexShader = /* glsl */`
 #include <common>
-#ifdef USE_SEL_MASK
-attribute float usdvSel;
-#endif
 varying vec3 vViewNormal;
 void main() {
   #include <begin_vertex>
   #include <project_vertex>
-  vec3 n = normal;
-  #ifdef USE_INSTANCING
-    n = mat3( instanceMatrix ) * n;
-  #endif
-  vViewNormal = normalize( normalMatrix * n );
-  #ifdef USE_SEL_MASK
-    if ( usdvSel < 0.5 ) gl_Position = vec4( 2.0, 2.0, 2.0, 1.0 ); // outside the clip volume
+  #ifdef HAS_NORMAL
+    vec3 n = normal;
+    #ifdef USE_INSTANCING
+      n = mat3( instanceMatrix ) * n;
+    #endif
+    vViewNormal = normalize( normalMatrix * n );
+  #else
+    vViewNormal = vec3( 0.0, 0.0, 1.0 );
   #endif
 }
 `;
@@ -63,26 +64,9 @@ void main() {
 }
 `;
 
-function makeMaterial(role, masked, side) {
-  const look = LOOKS[role];
-  return new THREE.ShaderMaterial({
-    vertexShader,
-    fragmentShader,
-    uniforms: {
-      uTint: { value: look.tint },
-      uAlpha: { value: new THREE.Vector2(look.alpha, look.rim) },
-      uFade: { value: 1 }, // per overlay: set in its onBeforeRender
-    },
-    defines: masked ? { USE_SEL_MASK: '' } : {},
-    transparent: true,
-    depthWrite: false,
-    depthFunc: THREE.LessEqualDepth,
-    polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -2,
-    side,
-  });
-}
+const IDENTITY = new THREE.Matrix4().toArray();
+const _a = new THREE.Matrix4();
+const _b = new THREE.Matrix4();
 
 function trianglesOf(mesh) {
   const g = mesh.geometry;
@@ -94,22 +78,25 @@ export class Selection {
     this.lod = lod;
     this.entries = [];
     this.byMesh = new Map();
-    this.overlays = new Map();
-    this.active = [];
-    this.live = new Set(); // overlays shown or fading out
-    this.selected = new Set();
-    this.selectedAt = 0;
     this.current = null;
-    this.materials = new Map();
+    this.selected = new Set(); // entries of the current selection
+    /** Holds the overlay batches; the viewer adds it to the scene. */
+    this.root = new THREE.Group();
+    this.root.name = 'usdv highlights';
+    this.shown = null; // the current generation
+    this.generations = new Set(); // the current one and any still fading out
+    this._lodVersion = -1;
   }
 
   /** Index the nodes of a freshly loaded model. */
   build(model) {
-    this.clear();
+    for (const g of this.generations) g.dispose();
+    this.generations.clear();
+    this.shown = null;
+    this.current = null;
+    this.selected = new Set();
     this.entries = [];
     this.byMesh = new Map();
-    this.overlays = new Map(); // the old model's overlays went with it
-    this.live = new Set();
     model.traverse((o) => {
       const path = o.userData?.usdPath;
       if (typeof path !== 'string') return;
@@ -219,12 +206,14 @@ export class Selection {
   set(sel) {
     this.clear();
     this.current = sel;
-    const now = performance.now();
-    this.selectedAt = now;
     const matched = this._match(sel);
-    for (const { entry, instances } of matched) this._show('selected', entry, instances, now);
     this.selected = new Set(matched.map((m) => m.entry));
-    if (sel?.instance === null || sel?.instance === undefined) return;
+    if (!matched.length) return;
+    const g = new Generation(this.root);
+    this.shown = g;
+    this.generations.add(g);
+    for (const { entry, instances } of matched) this._add(g, 'selected', entry, instances);
+    if (sel.instance === null || sel.instance === undefined) return;
 
     const protos = new Set(matched.map((m) => m.entry.proto));
     for (const entry of this.entries) {
@@ -232,8 +221,8 @@ export class Selection {
       if (entry.ids) {
         const others = [];
         for (let i = 0; i < entry.ids.length; i++) if (Math.round(entry.ids[i]) !== sel.instance) others.push(i);
-        if (others.length) this._show('peer', entry, others, now + PEER_DELAY);
-      } else if (entry.instance !== sel.instance) this._show('peer', entry, null, now + PEER_DELAY);
+        if (others.length) this._add(g, 'peer', entry, others);
+      } else if (entry.instance !== sel.instance) this._add(g, 'peer', entry, null);
     }
   }
 
@@ -242,153 +231,251 @@ export class Selection {
    * (the other copies of a native instance). Added to the current selection.
    */
   setPeers(paths) {
-    if (!paths?.length) return;
+    const g = this.shown;
+    if (!g || !paths?.length) return;
     const wanted = new Set(paths);
-    const start = Math.max(performance.now(), this.selectedAt + PEER_DELAY);
     for (const entry of this.entries) {
       if (this.selected.has(entry)) continue;
       // the entry's prim or one of its ancestors is a peer
       for (let p = entry.path; p.length > 1; p = p.slice(0, Math.max(p.lastIndexOf('/'), 1))) {
         if (wanted.has(p)) {
-          this._show('peer', entry, null, start);
+          this._add(g, 'peer', entry, null);
           break;
         }
       }
     }
   }
 
-  _show(role, entry, instances, start) {
-    for (const mesh of entry.meshes) {
-      const masked = !!(instances && mesh.isInstancedMesh);
-      const overlay = this._overlayFor(mesh, role, masked);
-      if (masked) {
-        const chosen = new Uint8Array(this._count(mesh));
-        for (const i of instances) chosen[i] = 1;
-        overlay.userData.chosen = chosen;
-        overlay.userData.version = -1;
-      }
-      overlay.userData.inUse = true;
-      overlay.userData.fade = 0;
-      this._fade(overlay, 1, start, FADE_IN);
-      this.active.push(overlay);
-    }
-  }
-
-  _fade(overlay, to, start, duration) {
-    overlay.userData.anim = { from: overlay.userData.fade, to, start, duration };
-    overlay.visible = true;
-    this.live.add(overlay);
+  /** Fade the current highlight out. */
+  clear() {
+    this.shown?.fadeOut(performance.now());
+    this.shown = null;
+    this.current = null;
+    this.selected = new Set();
   }
 
   /** Step the fades to time `now`. Returns whether any is still running. */
   animate(now) {
     let running = false;
-    for (const o of this.live) {
-      const a = o.userData.anim;
-      if (!a) continue;
-      const t = Math.min(Math.max((now - a.start) / a.duration, 0), 1);
-      o.userData.fade = a.from + (a.to - a.from) * smooth(t);
-      if (t < 1) {
-        running = true;
-        continue;
-      }
-      o.userData.anim = null;
-      if (a.to === 0) { // faded out: back to the pool
-        o.visible = false;
-        o.userData.inUse = false;
-        this.live.delete(o);
+    for (const g of this.generations) {
+      if (g.animate(now)) running = true;
+      else if (g.closing) {
+        g.dispose();
+        this.generations.delete(g);
       }
     }
     return running;
   }
 
-  /** Follow the LOD manager's latest instance packing. Call after lod.update(). */
+  /** Follow the LOD manager's latest choices. Call after lod.update(). */
   sync() {
-    for (const o of this.live) o.userData.sync?.();
+    const lodChanged = this.lod.version !== this._lodVersion;
+    this._lodVersion = this.lod.version;
+    for (const g of this.generations) g.pack(lodChanged);
   }
 
-  /** Fade the current highlight out. */
-  clear() {
-    const now = performance.now();
-    for (const o of this.active) this._fade(o, 0, now, FADE_OUT);
-    this.active = [];
-    this.selected = new Set();
-    this.current = null;
-  }
-
-  _material(role, masked, side) {
-    const key = `${role}:${masked}:${side}`;
-    if (!this.materials.has(key)) this.materials.set(key, makeMaterial(role, masked, side));
-    return this.materials.get(key);
-  }
-
-  _overlayFor(mesh, role, masked) {
-    const key = `${role}:${masked}`;
-    let byKind = this.overlays.get(mesh);
-    if (!byKind) {
-      byKind = {};
-      this.overlays.set(mesh, byKind);
-    }
-    const pool = (byKind[key] ??= []);
-    const free = pool.find((o) => !o.userData.inUse);
-    if (free) return free;
-
-    const src = mesh.geometry;
-    const geometry = new THREE.BufferGeometry();
-    geometry.setIndex(src.index);
-    geometry.setAttribute('position', src.attributes.position);
-    if (src.attributes.normal) geometry.setAttribute('normal', src.attributes.normal);
-    else geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(src.attributes.position.count * 3), 3));
-    for (const group of src.groups) geometry.addGroup(group.start, group.count, group.materialIndex);
-    const side = (Array.isArray(mesh.material) ? mesh.material[0] : mesh.material)?.side ?? THREE.FrontSide;
-    const material = this._material(role, masked, side);
-
-    let overlay;
-    if (mesh.isInstancedMesh) {
-      overlay = new THREE.InstancedMesh(geometry, material, 1);
-      overlay.instanceMatrix = mesh.instanceMatrix; // shared: same packing, same upload
-      if (masked) {
-        const sel = new THREE.InstancedBufferAttribute(new Float32Array(mesh.instanceMatrix.count), 1);
-        sel.setUsage(THREE.DynamicDrawUsage);
-        geometry.setAttribute('usdvSel', sel);
+  /** Highlight `instances` (original indices; null = all) of an entry's meshes. */
+  _add(generation, role, entry, instances) {
+    for (const mesh of entry.meshes) {
+      const managed = this.lod.groupOf.get(mesh);
+      let source;
+      if (managed) {
+        const { group, level } = managed;
+        source = {
+          world: group.world,
+          matrices: group.instanced ? group.matrices : null,
+          assigned: group.assigned,
+          level,
+          count: group.count,
+        };
+      } else {
+        source = {
+          world: mesh.matrixWorld,
+          matrices: mesh.isInstancedMesh ? mesh.instanceMatrix.array.slice(0, mesh.count * 16) : null,
+          assigned: null,
+          level: 0,
+          count: mesh.isInstancedMesh ? mesh.count : 1,
+        };
       }
-      const lod = this.lod;
-      // run by sync() after each LOD update and before the render: attributes
-      // are uploaded before onBeforeRender, so a mask set there lags a frame
-      overlay.userData.sync = () => {
-        overlay.count = mesh.count;
-        if (!masked) return;
-        const managed = lod.groupOf.get(mesh);
-        const version = managed ? managed.group.version : 0;
-        if (overlay.userData.version === version) return;
-        overlay.userData.version = version;
-        const chosen = overlay.userData.chosen;
-        const attr = geometry.attributes.usdvSel;
-        for (let slot = 0; slot < mesh.count; slot++) {
-          attr.array[slot] = chosen[lod.instanceInSlot(mesh, slot)] ? 1 : 0;
-        }
-        attr.needsUpdate = true;
-      };
-    } else {
-      overlay = new THREE.Mesh(geometry, material);
+      source.indices = instances && source.matrices ? Int32Array.from(instances) : null;
+      generation.add(role, mesh, source);
     }
-    overlay.name = 'usdv selection';
-    overlay.userData.usdvOverlay = true;
-    overlay.userData.fade = 0;
-    overlay.onBeforeRender = function onBeforeRender(r, sc, c, g, m) {
-      m.uniforms.uFade.value = this.userData.fade; // the material is shared: set per draw
-      m.uniformsNeedUpdate = true;
+  }
+}
+
+/** One selection's highlight: its batches, and a fade per role. */
+class Generation {
+  constructor(root) {
+    this.root = root;
+    this.batches = new Map();
+    this.materials = new Map();
+    this.closing = false;
+    const now = performance.now();
+    this.roles = {
+      selected: { fade: { value: 0 }, anim: { from: 0, to: 1, start: now, duration: FADE_IN } },
+      peer: { fade: { value: 0 }, anim: null }, // starts with the first peer
     };
-    overlay.frustumCulled = false;
-    overlay.castShadow = false;
-    overlay.receiveShadow = false;
-    overlay.renderOrder = role === 'selected' ? 11 : 10; // the selection tints over its peers
-    overlay.layers.set(HELPER_LAYER);
-    overlay.visible = false;
-    overlay.matrixAutoUpdate = false; // identity: the parent's transform is the mesh's
-    mesh.add(overlay);
-    overlay.updateMatrixWorld(true);
-    pool.push(overlay);
-    return overlay;
+    this.createdAt = now;
+  }
+
+  add(role, mesh, source) {
+    const material = this._material(role, mesh);
+    const key = `${role}:${mesh.geometry.uuid}:${material.uuid}`;
+    let batch = this.batches.get(key);
+    if (!batch) {
+      batch = new Batch(mesh.geometry, material, this.root);
+      this.batches.set(key, batch);
+    }
+    batch.add(source);
+    // peers fade in a moment after the selection, or when they arrive (from the server)
+    const r = this.roles[role];
+    if (role === 'peer' && !r.started && !this.closing) {
+      r.started = true;
+      r.anim = { from: 0, to: 1, start: Math.max(performance.now(), this.createdAt + PEER_DELAY), duration: FADE_IN };
+    }
+  }
+
+  _material(role, mesh) {
+    const side = (Array.isArray(mesh.material) ? mesh.material[0] : mesh.material)?.side ?? THREE.FrontSide;
+    const normal = !!mesh.geometry.attributes.normal;
+    const key = `${role}:${side}:${normal}`;
+    let m = this.materials.get(key);
+    if (!m) {
+      const look = LOOKS[role];
+      m = new THREE.ShaderMaterial({
+        vertexShader,
+        fragmentShader,
+        uniforms: {
+          uTint: { value: look.tint },
+          uAlpha: { value: new THREE.Vector2(look.alpha, look.rim) },
+          uFade: this.roles[role].fade, // shared by the role's materials: one value to animate
+        },
+        defines: normal ? { HAS_NORMAL: '' } : {},
+        transparent: true,
+        depthWrite: false,
+        depthFunc: THREE.LessEqualDepth,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -2,
+        side,
+      });
+      m.userData.order = look.order;
+      this.materials.set(key, m);
+    }
+    return m;
+  }
+
+  fadeOut(now) {
+    this.closing = true;
+    for (const r of Object.values(this.roles)) {
+      r.anim = { from: r.fade.value, to: 0, start: now, duration: FADE_OUT };
+    }
+  }
+
+  /** Returns whether a fade is still running. */
+  animate(now) {
+    let running = false;
+    for (const r of Object.values(this.roles)) {
+      const a = r.anim;
+      if (!a) continue;
+      const t = Math.min(Math.max((now - a.start) / a.duration, 0), 1);
+      r.fade.value = a.from + (a.to - a.from) * smooth(t);
+      if (t < 1) running = true;
+      else r.anim = null;
+    }
+    return running;
+  }
+
+  pack(lodChanged) {
+    for (const b of this.batches.values()) if (b.dirty || (lodChanged && b.followsLod)) b.pack();
+  }
+
+  dispose() {
+    for (const b of this.batches.values()) b.dispose();
+    for (const m of this.materials.values()) m.dispose();
+    this.batches.clear();
+    this.materials.clear();
+  }
+}
+
+/**
+ * Every highlighted copy of one geometry, in one role: an InstancedMesh of
+ * the copies drawn now. When all copies share a world transform (one
+ * instancer, say) it becomes the mesh's own and instance matrices are copied
+ * as they are; otherwise each copy's full transform is written.
+ */
+class Batch {
+  constructor(geometry, material, root) {
+    this.geometry = geometry;
+    this.material = material;
+    this.root = root;
+    this.sources = [];
+    this.world = undefined; // the shared world transform; null once they differ
+    this.capacity = 0;
+    this.mesh = null;
+    this.dirty = true;
+    this.followsLod = false; // whether any copy's visibility comes from the LOD manager
+  }
+
+  add(source) {
+    this.sources.push(source);
+    if (source.assigned) this.followsLod = true;
+    if (this.world === undefined) this.world = source.world;
+    else if (this.world && !this.world.equals(source.world)) this.world = null;
+    this.dirty = true;
+  }
+
+  _ensureCapacity() {
+    const needed = this.sources.reduce((n, s) => n + (s.indices ? s.indices.length : s.count), 0);
+    if (this.mesh && needed <= this.capacity) return;
+    this.mesh?.removeFromParent();
+    this.mesh?.dispose();
+    const mesh = new THREE.InstancedMesh(this.geometry, this.material, Math.max(needed, 1));
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.name = 'usdv highlight';
+    mesh.frustumCulled = false; // only drawn copies are packed
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    mesh.renderOrder = this.material.userData.order;
+    mesh.layers.set(HELPER_LAYER);
+    mesh.matrixAutoUpdate = false;
+    this.root.add(mesh);
+    this.mesh = mesh;
+    this.capacity = Math.max(needed, 1);
+  }
+
+  pack() {
+    this._ensureCapacity();
+    const out = this.mesh.instanceMatrix.array;
+    const shared = !!this.world;
+    let n = 0;
+    for (const s of this.sources) {
+      const { indices, assigned, level, matrices } = s;
+      const len = indices ? indices.length : s.count;
+      for (let k = 0; k < len; k++) {
+        const i = indices ? indices[k] : k;
+        if (assigned && assigned[i] !== level) continue; // culled, or drawn at another level
+        if (shared) {
+          if (matrices) out.set(matrices.subarray(i * 16, i * 16 + 16), n * 16);
+          else out.set(IDENTITY, n * 16);
+        } else {
+          _a.copy(s.world);
+          if (matrices) _a.multiply(_b.fromArray(matrices, i * 16));
+          _a.toArray(out, n * 16);
+        }
+        n += 1;
+      }
+    }
+    this.mesh.count = n;
+    this.mesh.visible = n > 0;
+    if (n) this.mesh.instanceMatrix.needsUpdate = true;
+    this.mesh.matrix.copy(shared ? this.world : _a.identity());
+    this.mesh.matrixWorld.copy(this.mesh.matrix); // the root sits at the scene origin
+    this.dirty = false;
+  }
+
+  dispose() {
+    this.mesh?.removeFromParent();
+    this.mesh?.dispose(); // the geometry is the model's: left alone
   }
 }

@@ -290,16 +290,23 @@ def test_materialx_triplanar_material(tmp_path):
     gltf, binary = parse_glb(data)
     m = gltf["materials"][0]
     pbr = m["pbrMetallicRoughness"]
+    # the plain glTF material (fallback) still carries the textures
     assert "baseColorTexture" in pbr and "metallicRoughnessTexture" in pbr
     assert pbr["roughnessFactor"] == 1.0 and pbr["metallicFactor"] == 0.0
-    tri = m["extras"]["usdvTriplanar"]
-    assert tri["space"] == "world"
-    assert tri["scale"] == pytest.approx(50.0)  # 0.5 per cm -> 50 per metre
+    # the viewer's shader: Karma's node as MaterialX triplanarprojection, projected in
+    # world space in stage units (cm), scaled by the authored 0.5
+    sh = m["extras"]["usdvShader"]
+    assert sh["surface"] == "standard_surface"
+    assert "Pworld" in sh["needs"] and "Nobject" in sh["needs"]
+    assert [0.5, 0.0, 0.0, 0.0] in sh["uniforms"]
+    assert "usdv_Pworld" in sh["main"]
+    assert {"diffuse", "roughness", "metalness"} <= set(sh["params"])
+    assert len(sh["textures"]) == 2
     # the oversized texture was downscaled and re-encoded; the ORM map is used as-is
     images = {i["name"]: i for i in gltf["images"]}
     assert images["bc.png"]["mimeType"] == "image/jpeg"
     assert images["orm.png"]["mimeType"] == "image/png"
-    assert any("hex-tiled" in w for w in info["warnings"])
+    assert any("hex tiling is not reproduced" in w for w in info["warnings"])
 
 
 def _dense_grid_stage(path, n=170):
@@ -539,11 +546,102 @@ def test_materialx_triplanarprojection_node(tmp_path):
     gltf, _ = parse_glb(data)
     m = gltf["materials"][0]
     assert "baseColorTexture" in m["pbrMetallicRoughness"]
-    # no position input: object space, one tile per unit
-    assert m["extras"]["usdvTriplanar"] == {"scale": 1.0, "space": "object", "flipNormalY": False}
+    # no position / normal input: MaterialX's defaults, object space
+    sh = m["extras"]["usdvShader"]
+    assert {"Pobject", "Nobject"} <= set(sh["needs"]) and "Pworld" not in sh["needs"]
+    assert len(sh["textures"]) == 1  # the same image on all three axes is sampled once
     assert info["warnings"] == []
 
+    # a different image per axis is sampled per axis
+    Image.new("RGB", (32, 32), (0, 0, 255)).save(tmp_path / "other.png")
     tri.GetInput("filez").Set("./other.png")
     stage.Save()
-    _, info = convert(str(path))
-    assert any("different image per axis" in w for w in info["warnings"])
+    data, info = convert(str(path))
+    gltf, _ = parse_glb(data)
+    assert len(gltf["materials"][0]["extras"]["usdvShader"]["textures"]) == 2
+
+
+def _subdiv_cube(path, scheme=None, crease=False):
+    stage = Usd.Stage.CreateNew(str(path))
+    m = UsdGeom.Mesh.Define(stage, "/Cube")
+    pts = [(x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]
+    idx = lambda x, y, z: (x > 0) * 4 + (y > 0) * 2 + (z > 0)  # noqa: E731
+    faces = [[(1, -1, -1), (1, 1, -1), (1, 1, 1), (1, -1, 1)], [(-1, -1, -1), (-1, -1, 1), (-1, 1, 1), (-1, 1, -1)],
+             [(-1, 1, -1), (-1, 1, 1), (1, 1, 1), (1, 1, -1)], [(-1, -1, -1), (1, -1, -1), (1, -1, 1), (-1, -1, 1)],
+             [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)], [(-1, -1, -1), (-1, 1, -1), (1, 1, -1), (1, -1, -1)]]
+    m.CreatePointsAttr(pts)
+    m.CreateFaceVertexCountsAttr([4] * 6)
+    m.CreateFaceVertexIndicesAttr([idx(*v) for f in faces for v in f])
+    if scheme:
+        m.CreateSubdivisionSchemeAttr(scheme)
+    uv = UsdGeom.PrimvarsAPI(m).CreatePrimvar("st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.faceVarying)
+    uv.Set([(0, 0), (1, 0), (1, 1), (0, 1)] * 6)
+    if crease:  # all 4 edges around the +x face infinitely sharp
+        ring = [idx(1, -1, -1), idx(1, 1, -1), idx(1, 1, 1), idx(1, -1, 1), idx(1, -1, -1)]
+        m.CreateCreaseIndicesAttr(ring)
+        m.CreateCreaseLengthsAttr([5])
+        m.CreateCreaseSharpnessesAttr([10.0])
+    stage.Save()
+
+
+def test_subdivision_surfaces(tmp_path):
+    """USD's default scheme is catmullClark: the smooth surface is shown, not the cage."""
+    _subdiv_cube(tmp_path / "cage.usda", scheme="none")
+    _, info = convert(str(tmp_path / "cage.usda"))
+    assert info["stats"]["triangles"] == 12 and info["stats"]["subdividedMeshes"] == 0
+
+    _subdiv_cube(tmp_path / "smooth.usda")
+    data, info = convert(str(tmp_path / "smooth.usda"))
+    assert info["stats"]["triangles"] == 6 * 16 * 2 and info["stats"]["subdividedMeshes"] == 1
+    gltf, binary = parse_glb(data)
+    prim = gltf["meshes"][0]["primitives"][0]
+    pos = accessor(gltf, binary, prim["attributes"]["POSITION"])
+    r = np.linalg.norm(pos, axis=1)
+    assert 0.8 < r.min() and r.max() < 0.95  # rounded towards the limit surface (no corner at 1.73)
+    uv = accessor(gltf, binary, prim["attributes"]["TEXCOORD_0"])
+    assert uv.min() >= 0 and uv.max() <= 1
+
+    _subdiv_cube(tmp_path / "crease.usda", crease=True)
+    data, _ = convert(str(tmp_path / "crease.usda"))
+    gltf, binary = parse_glb(data)
+    pos = accessor(gltf, binary, gltf["meshes"][0]["primitives"][0]["attributes"]["POSITION"])
+    # the creased face stays flat at x = 1
+    assert np.isclose(pos[:, 0].max(), 1.0)
+    assert (np.isclose(pos[:, 0], 1.0)).sum() >= 9
+
+
+def test_curves_points_capsules(tmp_path):
+    from tests import make_shader_scenes
+
+    make_shader_scenes.geometry(tmp_path)
+    data, info = convert(str(tmp_path / "geometry.usda"))
+    assert not info["warnings"]
+    s = info["stats"]
+    assert s["curves"] == 6 and s["points"] == 72
+    gltf, binary = parse_glb(data)
+    meshes = {m["name"]: m for m in gltf["meshes"]}
+    # cubic curves are evaluated and swept into tubes with their widths
+    tube = meshes["/World/Curves_bspline_nonperiodic_cubic"]["primitives"][0]
+    assert tube["mode"] == 4
+    pos = accessor(gltf, binary, tube["attributes"]["POSITION"])
+    nrm = accessor(gltf, binary, tube["attributes"]["NORMAL"])
+    assert len(pos) % 6 == 0  # six sides per ring
+    # triangles face outwards: winding agrees with the radial normals
+    tri = accessor(gltf, binary, tube["indices"]).reshape(-1, 3)
+    p = pos[tri]
+    fn = np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])
+    assert (np.sum(fn * nrm[tri[:, 0]], axis=1) > 0).mean() > 0.99
+    # pinned catmullRom reaches its end points
+    cr = meshes["/World/Curves_catmullRom_pinned_cubic"]["primitives"][0]
+    cpos = accessor(gltf, binary, cr["attributes"]["POSITION"])
+    assert np.abs(cpos[:, 1]).min() < 0.05  # the helix starts at y = 0
+    # no widths: GL lines
+    assert meshes["/World/Lines"]["primitives"][0]["mode"] == 1
+    # points: one instanced sphere per point, with per-point colour
+    node = next(n for n in gltf["nodes"] if n.get("name") == "/World/Points")
+    inst = node["extensions"]["EXT_mesh_gpu_instancing"]["attributes"]
+    assert gltf["accessors"][inst["TRANSLATION"]]["count"] == 72 and "_COLOR_0" in inst
+    # capsules: hemispherical ends along their axis
+    cap = next(n for n in gltf["nodes"] if n.get("name") == "/World/CapsuleY")
+    cpos = accessor(gltf, binary, gltf["meshes"][cap["mesh"]]["primitives"][0]["attributes"]["POSITION"])
+    assert np.isclose(cpos[:, 1].max(), 0.4 + 0.3) and np.isclose(np.abs(cpos[:, 0]).max(), 0.3, atol=1e-3)
