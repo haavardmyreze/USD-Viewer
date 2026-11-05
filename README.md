@@ -146,32 +146,28 @@ studio.
 
 ## Info card
 
-Clicking geometry opens a small card beside the cursor saying who made it and what
-state it is in. It reads the pipeline's own bookkeeping, as
-[usd-refgraph](../USD_RND/USD_Pipeline/usd-refgraph) does: the publish record every
+Clicking geometry opens a small card docked at the top left, opposite the side panel,
+so it never covers what you clicked. It says who made the object and what state it is
+in, read from the pipeline's own bookkeeping as
+[usd-refgraph](../USD_RND/USD_Pipeline/usd-refgraph) reads it: the publish record every
 published layer carries in `customLayerData` (`artist`, `status`, `comment`,
 `hip_file`, `rop_path`, `export_datetime_unix`) and the naming convention, which says
 which asset a file belongs to and which block of it. Nothing is stored anywhere else.
 
-From the inside out, the card shows:
+The card is meant to be read at a glance:
 
 - **The asset**, found by walking up from the prim to the reference (or payload) that
-  brought it in: its name and category (`env-column`, Environment asset), its status
-  rolled up from its layers (an asset is only as finished as its least finished layer),
-  who published it and when.
-- **Where this copy sits**: how many of a PointInstancer's instances share its
-  prototype (or how many native instances there are), the variant picked for it, and
-  the layer that placed it.
-- **Published layers**: the assembly, then its blocks, each with its status, artist and
-  publish time, and its comment. A row opens onto the full record: workfile, ROP, exact
-  time, any other keys, and the file (with a copy button).
-- **Material**: the material bound to the geometry, the library it came from when it is
-  not the asset's own (`from mtl-stone`, with that library's status), and the textures it
-  reads, with their channel and resolution; missing ones in red.
-- **Placed in**: the set or shot around the asset, down to the stage's root layer, each
-  folded to one line that opens onto its layers.
-- **Things to fix**: missing textures, layers with no publish record, names outside the
-  convention and statuses the pipeline does not know.
+  brought it in: `env-column`, Environment asset.
+- **Its status, who published last and when**: one line. An asset is only as finished
+  as its least finished layer.
+- **Variant and copies**, in one quiet line: `model damaged · 17 of 64 instances`.
+- **Its layers**: the assembly, then its blocks, each with its status dot and how long
+  ago it was published. A row opens onto the full record: comment, artist, exact time,
+  workfile, ROP and the file (with a copy button).
+- **Material** and **Set** (or Shot), one line each: the bound material and the library
+  it came from (`Stone · mtl-stone`), which opens onto its textures; and the set or shot
+  that placed the asset.
+- **Only what needs fixing**: missing textures and layers with no publish record.
 
 Status reads as in usd-refgraph: amber placeholder, blue production ready, green locked.
 Esc or a click on empty space closes the card; a variant switch or a change on disk

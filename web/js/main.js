@@ -375,7 +375,7 @@ async function loadReport(next, { same = false } = {}) {
   renderVariants();
   void showSelection(graph.selection);
   // re-composed (a variant switched, a file changed): the card reads the new stage
-  if (same && infoCard.visible && infoCard.sel) void infoCard.show(next.sceneId, infoCard.sel, infoCard.anchor);
+  if (same && infoCard.visible && infoCard.sel) void infoCard.show(next.sceneId, infoCard.sel);
   else infoCard.hide();
   hideLoading();
 }
@@ -622,9 +622,9 @@ async function showSelection(sel) {
 
 /**
  * Select from the 3D view (or clear with null); the tree opens onto the prim. A
- * click at window point `at` also opens the info card there.
+ * click (`fromClick`) also opens the info card.
  */
-function selectFromView(hit, at = null) {
+function selectFromView(hit, fromClick = false) {
   if (!hit) {
     infoCard.hide();
     void showSelection(null);
@@ -634,7 +634,7 @@ function selectFromView(hit, at = null) {
   const sel = { path: hit.path, instance: hit.instance ?? null };
   void showSelection(sel);
   void graph.reveal(sel.path, sel.instance);
-  if (at && showInfoCard && graph.sceneId) void infoCard.show(graph.sceneId, { ...sel, proto: hit.proto ?? null }, at);
+  if (fromClick && showInfoCard && graph.sceneId) void infoCard.show(graph.sceneId, { ...sel, proto: hit.proto ?? null });
   else infoCard.hide();
 }
 
@@ -810,7 +810,7 @@ $('viewport').addEventListener('pointerup', (e) => {
   if (!p || e.button !== 0 || !viewer.model || !graph.sceneId) return;
   if (Math.hypot(e.clientX - p.x, e.clientY - p.y) > 4 || performance.now() - p.t > 400) return;
   const rect = $('viewport').getBoundingClientRect();
-  selectFromView(viewer.pickObject(e.clientX - rect.left, e.clientY - rect.top), { x: e.clientX, y: e.clientY });
+  selectFromView(viewer.pickObject(e.clientX - rect.left, e.clientY - rect.top), true);
 });
 $('btn-proxy').addEventListener('click', togglePurpose);
 $('btn-help').addEventListener('click', () => { $('help').hidden = false; });
