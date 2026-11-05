@@ -31,12 +31,15 @@ export class LodManager {
     /** Screen-height fraction below which LOD1 is used; each further level halves it. */
     this.threshold = 0.45;
     this.stats = { triangles: 0, visible: 0, culled: 0, total: 0 };
+    /** Bumped whenever any group's packing or visibility changes. */
+    this.version = 0;
   }
 
   /** Find LOD groups (and plain instanced meshes) under `root`. */
   setup(root) {
     this.groups = [];
     this.groupOf = new Map();
+    this.version += 1;
     root.updateMatrixWorld(true);
     const byId = new Map();
     const grouped = new Set();
@@ -159,6 +162,7 @@ export class LodManager {
       g.assigned.fill(-2);
       g.version += 1;
     }
+    this.version += 1;
   }
 
   /**
@@ -223,7 +227,10 @@ export class LodManager {
         stats.triangles += g.tris[level];
       }
       stats.total += g.count;
-      if (changed) g.version += 1;
+      if (changed) {
+        g.version += 1;
+        this.version += 1;
+      }
       for (let l = 0; l < nLevels; l++) {
         for (const m of g.levels[l]) {
           m.visible = counts[l] > 0;
