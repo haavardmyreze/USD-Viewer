@@ -196,6 +196,9 @@ def check_spaces(res) -> list[str]:
         x, y, z = P
         if abs(z - 25) > 1:
             continue
+        # quads span 80 units from x, y multiples of 10 / 20: skip antialiased edge pixels
+        if min(abs(x - round(x / 10) * 10), abs(y - round(y / 10) * 10)) < 1.0:
+            continue
         wrap = False
         if 130 <= x <= 210 and 20 <= y <= 100:
             exp, k, wrap = np.mod(P * 0.01, 1.0), "world position", True
@@ -213,6 +216,12 @@ def check_spaces(res) -> list[str]:
             if min(abs(u - 1), abs(v - 1), u, v, 2 - u, 2 - v) < 0.05:
                 continue
             exp, k = np.array(udim[(int(u), int(v))], float), "UDIM"
+        elif 300 <= x <= 380 and 120 <= y <= 200:
+            u, v = (x - 300) / 80, (y - 120) / 80
+            if min(abs(u - .5), abs(v - .5), u, v, 1 - u, 1 - v) < 0.03:
+                continue
+            red = quads[(int(u > .5), int(v > .5))][0]
+            exp, k = np.array([red, red, red], float), "1.38 swizzle"
         else:
             continue
         e = np.abs(c - exp)
@@ -220,7 +229,7 @@ def check_spaces(res) -> list[str]:
             e = np.minimum(e, 1 - e)
         errs.setdefault(k, []).append(float(e.max()))
     problems = []
-    for k in ("world position", "object position", "texcoord", "image orientation", "UDIM"):
+    for k in ("world position", "object position", "texcoord", "image orientation", "UDIM", "1.38 swizzle"):
         v = np.array(errs.get(k, []))
         ok = len(v) > 50 and np.percentile(v, 95) < 0.01
         print(f"  {k:18s} {'ok ' if ok else 'BAD'} n={len(v)} p95 error={np.percentile(v, 95) if len(v) else -1:.4f}")
@@ -299,7 +308,7 @@ def main() -> int:
             print(f"  fell back: {res['failed']}")
             problems.append("node scene")
         print("spaces:")
-        problems += check_spaces(view(work, base, scenes / "spaces.usda", "1.4,4,-0.6", "1.4,0,-1.1"))
+        problems += check_spaces(view(work, base, scenes / "spaces.usda", "1.9,5,-0.6", "1.9,0,-1.1"))
         problems += check_triplanar(view(work, base, scenes / "triplanar.usda", "0.75,0.75,0.8", "0.15,0.3,0.07"),
                                     scenes / "triplanar.usda", scenes / "quads.png")
     finally:

@@ -204,6 +204,10 @@ the viewer's lights, environment and shadows apply. That last step is the approx
 three.js's BRDF is not Karma's, subsurface is shown as a diffuse tint and coat colour
 tints the base. Materials that only differ in values share one compiled shader.
 
+Networks written with MaterialX 1.38 (Houdini 20) are read too: `swizzle` nodes, the old
+`normalmap` and `atan2` inputs are translated the way MaterialX's own 1.38 → 1.39 upgrade
+does, and file paths routed through `dot` nodes are followed.
+
 DCC-specific nodes MaterialX does not define (e.g. Karma's `kma_*`) are read from extra
 definition folders when available (`USDV_MATERIALX_PATH`, or the
 `PXR_MTLX_PLUGIN_SEARCH_PATHS` Houdini sets). Otherwise a triplanar or hex-tiled node is

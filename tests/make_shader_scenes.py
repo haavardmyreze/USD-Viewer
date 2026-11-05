@@ -147,6 +147,21 @@ def spaces(out: Path) -> None:
         return n.out(n.node("img", "ND_image_color3", file=Sdf.AssetPath("./tiles/paint.<UDIM>.png")))
 
     udimm = unlit(stage, "/World/Looks/Udim", udim_fn)
+
+    def houdini138_fn(n):
+        """As Houdini 20 writes it (MaterialX 1.38): a file shared through a dot node,
+        an image read as color4 and the red channel spread to grey by a swizzle."""
+        path = n.node("path", "ND_dot_filename", **{"in": Sdf.AssetPath("./quads.png")})
+        path.CreateOutput("out", T.Asset)
+        img = n.out(n.node("img", "ND_image_color4"), type_=T.Color4f)
+        Net.set(img, "file", (path, "out"))
+        rgb = n.out(n.node("rgb", "ND_swizzle_color4_color3", channels="rgb"))
+        Net.set(rgb, "in", (img, "out"))
+        grey = n.out(n.node("grey", "ND_swizzle_color3_color3", channels="rrr"))
+        Net.set(grey, "in", rgb)
+        return grey
+
+    swz = unlit(stage, "/World/Looks/Houdini138", houdini138_fn)
     # world-space quad: placed by a transform, so world and object differ
     x = UsdGeom.Xform.Define(stage, "/World/Moved")
     x.AddTranslateOp().Set((130.0, 20.0, 5.0))
@@ -160,6 +175,7 @@ def spaces(out: Path) -> None:
     quad(stage, "/World/TexQuad", 100, 120, 80, 25, texm)
     # UDIM: st spans two tiles each way (1001, 1002, 1011, 1012 = red, green, blue, missing)
     uq = quad(stage, "/World/UdimQuad", 200, 120, 80, 25, udimm)
+    quad(stage, "/World/SwizzleQuad", 300, 120, 80, 25, swz)
     UsdGeom.PrimvarsAPI(uq).GetPrimvar("st").Set([(0, 0), (2, 0), (2, 2), (0, 2)])
     stage.SetDefaultPrim(stage.GetPrimAtPath("/World"))
     stage.Save()

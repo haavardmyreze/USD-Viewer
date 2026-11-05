@@ -552,7 +552,7 @@ class Generator:
                 return None
             if binding.kind == "value":
                 return binding.value
-            if binding.kind != "conn" or binding.node is None or isinstance(binding.node, _Expr):
+            if binding.kind != "conn" or binding.node is None or binding.node.nd is None:
                 return None
             node = binding.node
             cat = node.nd.getNodeString()
@@ -667,6 +667,11 @@ class Generator:
         """(expression, MaterialX type) of one output of a node."""
         if isinstance(node, _Expr):
             return node.expr, node.mtype
+        if isinstance(node, _Swizzle):
+            key = (id(node), "out")
+            if key not in self.memo:
+                self.memo[key] = self._swizzle(node, depth)
+            return self.memo[key]
         if depth > MAX_DEPTH:
             raise GenError("network too deep")
         key = (id(node), output)
@@ -711,6 +716,31 @@ class Generator:
         if kind == "file":
             return self._emit_file(node, impl[0], impl[1], output, depth)
         raise GenError(f"no GLSL implementation for {nd.getName()}")
+
+    def _swizzle(self, node: "_Swizzle", depth: int) -> tuple[str, str]:
+        n_in = WIDTH.get(node.in_type, 1)
+        if node.binding is None:
+            src = _default(node.in_type)
+        else:
+            src = self.binding_expr(node.binding, node.in_type, depth)
+        v = self.var()
+        self.lines.append(f"{GLSL_TYPE[node.in_type]} {v} = {src};")
+        comps = []
+        for ch in node.channels or "":
+            if ch in "01":
+                comps.append(f"{ch}.0")
+            else:
+                i = {"r": 0, "x": 0, "g": 1, "y": 1, "b": 2, "z": 2, "a": 3, "w": 3}.get(ch)
+                if i is None or i >= n_in:
+                    comps.append("0.0")
+                else:
+                    comps.append(v if n_in == 1 else f"{v}[{i}]")
+        n_out = WIDTH.get(node.mtype, 1)
+        comps = (comps + ["0.0"] * n_out)[:n_out] if comps else [v if n_in == 1 else f"{v}[0]"] * n_out
+        out = self.var()
+        expr = comps[0] if n_out == 1 else f"{GLSL_TYPE[node.mtype]}({', '.join(comps)})"
+        self.lines.append(f"{GLSL_TYPE[node.mtype]} {out} = {expr};")
+        return out, node.mtype
 
     def _emit_src(self, node: Node, code: str, otype: str, depth: int) -> tuple[str, str]:
         nd = node.nd
@@ -790,9 +820,17 @@ class Generator:
         file_inp = next(i for i in self.lib.inputs(nd) if i.getType() == "filename")
         b = node.inputs.get(file_inp.getName())
         owner = node
-        while b is not None and b.kind == "iface":
-            owner = owner.scope.outer
-            b = owner.inputs.get(b.value)
+        for _ in range(16):
+            while b is not None and b.kind == "iface":
+                owner = owner.scope.outer
+                b = owner.inputs.get(b.value)
+            # a file path shared through a dot / constant node (common in Houdini networks)
+            if (b is not None and b.kind == "conn" and b.node is not None and b.node.nd is not None
+                    and b.node.nd.getNodeString() in ("dot", "constant")):
+                owner = b.node
+                b = owner.inputs.get("in" if owner.nd.getNodeString() == "dot" else "value")
+                continue
+            break
         if b is None or b.kind not in ("asset", "value") or not b.value:
             return None
 
@@ -988,6 +1026,21 @@ class Generator:
             inv = "usdv_WorldToObj" if frm == "object" else "usdv_ObjToWorld"
             return f"normalize(transpose(mat3({inv})) * {v})", otype
         return None
+
+
+class _Swizzle(Node):
+    """MaterialX 1.38's swizzle (removed in 1.39; Houdini 20 still writes it).
+
+    Picks channels of `in` by the `channels` string (r g b a / x y z w, or the
+    constants 0 and 1), as MaterialX's own 1.38 -> 1.39 upgrade translates it.
+    """
+
+    def __init__(self, in_type: str, out_type: str, binding, channels: str):
+        super().__init__(nd=None)
+        self.in_type = in_type
+        self.mtype = out_type
+        self.binding = binding
+        self.channels = channels
 
 
 class _Expr(Node):
@@ -1432,6 +1485,12 @@ def generate(surface: Node, *, texture_cb, primvar_cb, frame=1.0, fps=24.0) -> S
 # UsdShade networks -> Node graph
 # ---------------------------------------------------------------------------
 
+# MaterialX 1.38 node ids (written by Houdini 20) renamed in 1.39: (new id, input renames)
+_LEGACY_IDS = {
+    "ND_normalmap": ("ND_normalmap_float", {}),
+    "ND_geompropvalue_string": ("ND_geompropvalueuniform_string", {}),
+}
+
 # USD shader ids that MaterialX's library defines under another name
 _USD_IDS = {
     "UsdPreviewSurface": "ND_UsdPreviewSurface_surfaceshader",
@@ -1496,8 +1555,19 @@ class UsdNetwork:
             if src and str(src) != "id":
                 self.warn(f"{path}: shaders from {src} files (OSL / MDL) are not supported")
                 return None
+        legacy = self._legacy(shader, sid, path)
+        if legacy is not None:
+            return legacy
         nd = self.lib.nodedef(_USD_IDS.get(sid, sid))
         rename = {}
+        if nd is None and sid in _LEGACY_IDS:  # MaterialX 1.38 names (Houdini 20)
+            nd, rename = self.lib.nodedef(_LEGACY_IDS[sid][0]), _LEGACY_IDS[sid][1]
+            if sid == "ND_normalmap":
+                sp = shader.GetInput("space")
+                if sp and str(sp.Get() or "tangent") == "object":
+                    self.warn(f"{_short(path)}: object-space normal maps are shown as tangent-space")
+        if nd is not None and sid.startswith("ND_atan2_") and shader.GetInput("in1"):
+            rename = {"in1": ["iny"], "in2": ["inx"]}  # renamed in MaterialX 1.39
         if nd is None:
             nd, rename = self._substitute(shader, sid, want_type)
             if nd is None:
@@ -1523,6 +1593,27 @@ class UsdNetwork:
             for b in node.inputs.values():
                 if b.kind == "asset" and not b.colorspace:
                     b.colorspace = color_space
+        return node
+
+    def _legacy(self, shader, sid: str, path: str):
+        """MaterialX 1.38 swizzle nodes, which 1.39 no longer defines."""
+        m = re.fullmatch(r"ND_swizzle_(\w+?)_(\w+)", sid)
+        if not m or self.lib.nodedef(sid) is not None:
+            return None
+        in_type, out_type = m.group(1), m.group(2)
+        if in_type not in GLSL_TYPE or out_type not in WIDTH:
+            return None
+        inp = shader.GetInput("in")
+        binding = self._binding(inp) if inp else None
+        ch = shader.GetInput("channels")
+        channels = ""
+        if ch:
+            attrs = ch.GetValueProducingAttributes()
+            v = attrs[0].Get(self.time) if attrs else None
+            channels = str(v or "")
+        node = _Swizzle(in_type, out_type, binding, channels)
+        node.name = path
+        self.cache[path] = node
         return node
 
     def _binding(self, inp) -> Binding | None:
@@ -1634,6 +1725,6 @@ def surface_node(material, network: UsdNetwork):
                 candidates.append((rank, s))
     for _rank, s in sorted(candidates, key=lambda c: c[0]):
         node = network.node(s, "surfaceshader")
-        if node is not None and node.nd.getNodeString() in SURFACES:
+        if node is not None and node.nd is not None and node.nd.getNodeString() in SURFACES:
             return node
     return None

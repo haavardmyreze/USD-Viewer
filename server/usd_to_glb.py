@@ -37,7 +37,7 @@ from .glb import GlbBuilder
 from .subdiv import Refinement
 from . import curves as _curves
 
-CONVERTER_VERSION = "7"
+CONVERTER_VERSION = "8"
 
 # Level of detail: meshes with at least this many triangles get simplified
 # versions (each ~1/4 of the previous) that the viewer switches to by screen size.

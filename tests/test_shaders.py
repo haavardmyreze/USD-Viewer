@@ -178,3 +178,41 @@ def test_edited_layer_is_reconverted_while_a_stage_holds_it(tmp_path):
     os.utime(path)
     _, info = convert(str(path))
     assert info["stats"]["meshPrims"] == 2
+
+
+def test_materialx_138_nodes(tmp_path):
+    """Houdini 20 writes MaterialX 1.38 ids: swizzle and normalmap no longer exist in 1.39."""
+    stage = Usd.Stage.CreateNew(str(tmp_path / "h20.usda"))
+    T = Sdf.ValueTypeNames
+    from PIL import Image
+    Image.new("RGBA", (8, 8), (200, 100, 50, 255)).save(tmp_path / "bc.png")
+    n = make_shader_scenes.Net(stage, "/World/M")
+    path = n.node("path", "ND_dot_filename", **{"in": Sdf.AssetPath("./bc.png")})
+    path.CreateOutput("out", T.Asset)
+    img = n.out(n.node("img", "ND_image_color4"), type_=T.Color4f)
+    make_shader_scenes.Net.set(img, "file", (path, "out"))
+    rgb = n.out(n.node("rgb", "ND_swizzle_color4_color3", channels="rgb"))
+    make_shader_scenes.Net.set(rgb, "in", (img, "out"))
+    rough = n.out(n.node("rough", "ND_swizzle_color4_float", channels="g"), type_=T.Float)
+    make_shader_scenes.Net.set(rough, "in", (img, "out"))
+    nimg = n.out(n.node("nimg", "ND_image_vector3", file=Sdf.AssetPath("./bc.png")), type_=T.Vector3f)
+    nm = n.out(n.node("nm", "ND_normalmap", scale=1.0, space="tangent"), type_=T.Vector3f)
+    make_shader_scenes.Net.set(nm, "in", (nimg, "out"))
+    at = n.out(n.node("at", "ND_atan2_float", in1=1.0, in2=2.0), type_=T.Float)
+    surf = n.node("surf", "ND_standard_surface_surfaceshader")
+    make_shader_scenes.Net.set(surf, "base_color", rgb)
+    make_shader_scenes.Net.set(surf, "specular_roughness", (rough, "out"))
+    make_shader_scenes.Net.set(surf, "normal", (nm, "out"))
+    make_shader_scenes.Net.set(surf, "metalness", (at, "out"))
+    cube = UsdGeom.Cube.Define(stage, "/World/C")
+    make_shader_scenes.UsdShade.MaterialBindingAPI.Apply(cube.GetPrim()).Bind(n.surface(surf))
+    stage.Save()
+    mats, _, info = _materials(tmp_path / "h20.usda")
+    assert not info["warnings"], info["warnings"]
+    sh = mats["M"]["extras"]["usdvShader"]
+    main = sh["main"]
+    assert len(sh["textures"]) == 2  # the colour image (file reached through the dot node) and the normal map
+    assert "mx_normalmap_float(" in main  # 1.38 normalmap -> 1.39 normalmap_float
+    assert "[1]" in main  # roughness = green channel only
+    # atan2(in1 = y, in2 = x): authored values reach iny / inx
+    assert "[1.0, 0.0, 0.0, 0.0]" in str(sh["uniforms"]) and "[2.0, 0.0, 0.0, 0.0]" in str(sh["uniforms"])
