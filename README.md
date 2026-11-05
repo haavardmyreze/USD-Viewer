@@ -9,6 +9,11 @@ converts the result to a single GLB, which the three.js viewer loads. MaterialX 
 UsdPreviewSurface shading networks are compiled to GLSL from MaterialX's own node
 library, so textures, maths, noises and projections look as they do in Houdini.
 
+**Status: under development, not in active use.** Nobody depends on the current
+behaviour, APIs or file formats yet, so changes are free to rewrite, break or
+depart from the existing logic and structure when that gives a better result.
+There is no backwards compatibility to keep.
+
 ```
 Browser                          Conversion service (Python + usd-core)
 ───────                          ──────────────────────────────────────
