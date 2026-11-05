@@ -13,6 +13,10 @@
 // geometry buffers and instance matrices and draws a translucent tint on top.
 // As a child it follows the mesh's LOD visibility; per-instance selections are
 // a mask attribute repacked whenever the LOD manager repacks the instances.
+//
+// Highlights fade in and out (animate() drives it): the selection first, its
+// peers a moment later. Overlays are pooled per mesh, so one can fade out while
+// another on the same mesh fades in.
 import * as THREE from 'three';
 import { HELPER_LAYER } from './picking.js';
 
@@ -21,6 +25,11 @@ const LOOKS = {
   selected: { tint: new THREE.Color(0x0a84ff), alpha: 0.32, rim: 0.38 }, // refgraph's selection blue
   peer: { tint: new THREE.Color(0xffa63d), alpha: 0.16, rim: 0.28 }, // the other copies: amber, faint
 };
+/** Fade timings, in ms. */
+const FADE_IN = 220;
+const FADE_OUT = 160;
+const PEER_DELAY = 140;
+const smooth = (t) => t * t * (3 - 2 * t);
 
 const vertexShader = /* glsl */`
 #include <common>
@@ -45,11 +54,12 @@ void main() {
 const fragmentShader = /* glsl */`
 uniform vec3 uTint;
 uniform vec2 uAlpha;
+uniform float uFade;
 varying vec3 vViewNormal;
 void main() {
   // a little stronger at grazing angles, so silhouettes read
   float rim = 1.0 - abs( normalize( vViewNormal ).z );
-  gl_FragColor = vec4( uTint, uAlpha.x + uAlpha.y * rim * rim );
+  gl_FragColor = vec4( uTint, ( uAlpha.x + uAlpha.y * rim * rim ) * uFade );
 }
 `;
 
@@ -58,7 +68,11 @@ function makeMaterial(role, masked, side) {
   return new THREE.ShaderMaterial({
     vertexShader,
     fragmentShader,
-    uniforms: { uTint: { value: look.tint }, uAlpha: { value: new THREE.Vector2(look.alpha, look.rim) } },
+    uniforms: {
+      uTint: { value: look.tint },
+      uAlpha: { value: new THREE.Vector2(look.alpha, look.rim) },
+      uFade: { value: 1 }, // per overlay: set in its onBeforeRender
+    },
     defines: masked ? { USE_SEL_MASK: '' } : {},
     transparent: true,
     depthWrite: false,
@@ -82,7 +96,9 @@ export class Selection {
     this.byMesh = new Map();
     this.overlays = new Map();
     this.active = [];
+    this.live = new Set(); // overlays shown or fading out
     this.selected = new Set();
+    this.selectedAt = 0;
     this.current = null;
     this.materials = new Map();
   }
@@ -92,7 +108,8 @@ export class Selection {
     this.clear();
     this.entries = [];
     this.byMesh = new Map();
-    this.overlays = new Map();
+    this.overlays = new Map(); // the old model's overlays went with it
+    this.live = new Set();
     model.traverse((o) => {
       const path = o.userData?.usdPath;
       if (typeof path !== 'string') return;
@@ -202,8 +219,10 @@ export class Selection {
   set(sel) {
     this.clear();
     this.current = sel;
+    const now = performance.now();
+    this.selectedAt = now;
     const matched = this._match(sel);
-    for (const { entry, instances } of matched) this._show('selected', entry, instances);
+    for (const { entry, instances } of matched) this._show('selected', entry, instances, now);
     this.selected = new Set(matched.map((m) => m.entry));
     if (sel?.instance === null || sel?.instance === undefined) return;
 
@@ -213,8 +232,8 @@ export class Selection {
       if (entry.ids) {
         const others = [];
         for (let i = 0; i < entry.ids.length; i++) if (Math.round(entry.ids[i]) !== sel.instance) others.push(i);
-        if (others.length) this._show('peer', entry, others);
-      } else if (entry.instance !== sel.instance) this._show('peer', entry, null);
+        if (others.length) this._show('peer', entry, others, now + PEER_DELAY);
+      } else if (entry.instance !== sel.instance) this._show('peer', entry, null, now + PEER_DELAY);
     }
   }
 
@@ -225,19 +244,20 @@ export class Selection {
   setPeers(paths) {
     if (!paths?.length) return;
     const wanted = new Set(paths);
+    const start = Math.max(performance.now(), this.selectedAt + PEER_DELAY);
     for (const entry of this.entries) {
       if (this.selected.has(entry)) continue;
       // the entry's prim or one of its ancestors is a peer
       for (let p = entry.path; p.length > 1; p = p.slice(0, Math.max(p.lastIndexOf('/'), 1))) {
         if (wanted.has(p)) {
-          this._show('peer', entry, null);
+          this._show('peer', entry, null, start);
           break;
         }
       }
     }
   }
 
-  _show(role, entry, instances) {
+  _show(role, entry, instances, start) {
     for (const mesh of entry.meshes) {
       const masked = !!(instances && mesh.isInstancedMesh);
       const overlay = this._overlayFor(mesh, role, masked);
@@ -247,18 +267,50 @@ export class Selection {
         overlay.userData.chosen = chosen;
         overlay.userData.version = -1;
       }
-      overlay.visible = true;
+      overlay.userData.inUse = true;
+      overlay.userData.fade = 0;
+      this._fade(overlay, 1, start, FADE_IN);
       this.active.push(overlay);
     }
   }
 
-  /** Follow the LOD manager's latest instance packing. Call after lod.update(). */
-  sync() {
-    for (const o of this.active) o.userData.sync?.();
+  _fade(overlay, to, start, duration) {
+    overlay.userData.anim = { from: overlay.userData.fade, to, start, duration };
+    overlay.visible = true;
+    this.live.add(overlay);
   }
 
+  /** Step the fades to time `now`. Returns whether any is still running. */
+  animate(now) {
+    let running = false;
+    for (const o of this.live) {
+      const a = o.userData.anim;
+      if (!a) continue;
+      const t = Math.min(Math.max((now - a.start) / a.duration, 0), 1);
+      o.userData.fade = a.from + (a.to - a.from) * smooth(t);
+      if (t < 1) {
+        running = true;
+        continue;
+      }
+      o.userData.anim = null;
+      if (a.to === 0) { // faded out: back to the pool
+        o.visible = false;
+        o.userData.inUse = false;
+        this.live.delete(o);
+      }
+    }
+    return running;
+  }
+
+  /** Follow the LOD manager's latest instance packing. Call after lod.update(). */
+  sync() {
+    for (const o of this.live) o.userData.sync?.();
+  }
+
+  /** Fade the current highlight out. */
   clear() {
-    for (const o of this.active) o.visible = false;
+    const now = performance.now();
+    for (const o of this.active) this._fade(o, 0, now, FADE_OUT);
     this.active = [];
     this.selected = new Set();
     this.current = null;
@@ -277,7 +329,9 @@ export class Selection {
       byKind = {};
       this.overlays.set(mesh, byKind);
     }
-    if (byKind[key]) return byKind[key];
+    const pool = (byKind[key] ??= []);
+    const free = pool.find((o) => !o.userData.inUse);
+    if (free) return free;
 
     const src = mesh.geometry;
     const geometry = new THREE.BufferGeometry();
@@ -320,6 +374,11 @@ export class Selection {
     }
     overlay.name = 'usdv selection';
     overlay.userData.usdvOverlay = true;
+    overlay.userData.fade = 0;
+    overlay.onBeforeRender = function onBeforeRender(r, sc, c, g, m) {
+      m.uniforms.uFade.value = this.userData.fade; // the material is shared: set per draw
+      m.uniformsNeedUpdate = true;
+    };
     overlay.frustumCulled = false;
     overlay.castShadow = false;
     overlay.receiveShadow = false;
@@ -329,7 +388,7 @@ export class Selection {
     overlay.matrixAutoUpdate = false; // identity: the parent's transform is the mesh's
     mesh.add(overlay);
     overlay.updateMatrixWorld(true);
-    byKind[key] = overlay;
+    pool.push(overlay);
     return overlay;
   }
 }

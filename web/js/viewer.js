@@ -80,6 +80,7 @@ export class Viewer {
     this._lastMove = 0;
     this._dirty = true;
     this._needsRefine = true;
+    this._animating = false;
     this._shadowsDirty = false;
     this._frameMs = 16;
     this._lastRenderAt = 0;
@@ -235,19 +236,14 @@ export class Viewer {
 
   /**
    * What the server knows about the current selection (GET .../selection):
-   * its pivot, drawn as a tripod, and the other copies of its instance, which
+   * its pivot, drawn as its axes, and the other copies of its instance, which
    * get a fainter highlight.
    */
   showSelectionInfo(info) {
     if (!this.model) return;
     if (info.pivot) {
       const frame = new THREE.Matrix4().fromArray(info.pivot.matrix); // USD row-major = three column-major
-      frame.premultiply(this.stageToWorld);
-      // sized to the selection, so it reaches about to the edge of what it moves
-      const box = this.selection.bounds(this.selection.current);
-      const radius = box ? box.getBoundingSphere(new THREE.Sphere()).radius : 0;
-      const length = radius > 0 ? radius * 0.8 : this.radius * 0.05;
-      this.pivot.show(frame, new THREE.Vector3().fromArray(info.pivot.point), length);
+      this.pivot.show(frame, this.stageToWorld, new THREE.Vector3().fromArray(info.pivot.point));
     } else this.pivot.hide();
     this.selection.setPeers(info.instances);
     this.selection.sync();
@@ -503,13 +499,22 @@ export class Viewer {
       this._needsRefine = true;
     }
 
-    const refine = !this._dirty && this._needsRefine && now - this._lastMove > 200;
-    if (!this._dirty && !refine) {
+    // highlight fades: one more frame after they end, to draw their last state
+    const wasAnimating = this._animating;
+    const fading = this.selection.animate(now);
+    this._animating = this.pivot.animate(now) || fading;
+    const animFrame = this._animating || wasAnimating;
+
+    const settled = now - this._lastMove > 200;
+    const refine = settled && this._needsRefine && !this._dirty;
+    // a fade over a still camera keeps full quality, so nothing changes detail under it
+    const full = refine || (settled && animFrame);
+    if (!this._dirty && !full && !animFrame) {
       this.onFrame?.(false);
       return;
     }
 
-    if (refine) {
+    if (full) {
       this._setPixelRatio(this.maxPixelRatio);
     } else {
       // while moving: trade resolution for frame rate (consecutive frames only)
@@ -527,15 +532,15 @@ export class Viewer {
     this._updateClipPlanes();
     if (this._shadowsDirty && this.options.shadows && this.model) this._renderShadows();
     const detail = DETAIL_LEVELS[this.options.detail] ?? 1;
-    this.lod.update(this.camera, refine ? Math.max(detail * 2, 2) : detail);
+    this.lod.update(this.camera, full ? Math.max(detail * 2, 2) : detail);
     this.selection.sync();
     this.renderer.render(this.scene, this.camera);
 
-    this.lastFrame = { triangles: this.renderer.info.render.triangles, refined: refine };
+    this.lastFrame = { triangles: this.renderer.info.render.triangles, refined: full };
     this._lastView.copy(this.camera.matrixWorld);
     this._lastRenderAt = now;
     this._dirty = false;
-    if (refine) this._needsRefine = false;
+    if (full) this._needsRefine = false;
     this.onFrame?.(true);
   }
 }
